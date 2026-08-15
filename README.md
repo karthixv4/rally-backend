@@ -73,6 +73,7 @@ All campaign endpoints use `:campaignId`. The API provides campaign list/create/
 GET, POST                         /api/campaigns
 GET, PATCH                        /api/campaigns/:campaignId
 POST                              /api/campaigns/:campaignId/attendees/import
+POST                              /api/campaigns/:campaignId/attendees/import-excel
 GET                               /api/campaigns/:campaignId/attendees
 GET, PATCH                        /api/campaigns/:campaignId/attendees/:attendeeId
 POST                              /api/campaigns/:campaignId/responses
@@ -88,6 +89,10 @@ POST                              /api/campaigns/:campaignId/call-events
 
 The response endpoints accept the Sarvam call fields in `snake_case`: `attendance_status`, `transport_mode`, `arrival_slot`, `decline_reason`, `seat_release`, `substitute_attendee`, `escalation_flag`, `call_summary`, `food_preference`, `parking_needed`, `dietary_requirements`, `accessibility_needs`, `team_status`, and `transcript`.
 
+### Demo XLSX attendee import
+
+Upload `demo-assets/Rally_Attendee_Import_Template.xlsx` as multipart form-data to `POST /api/campaigns/:campaignId/attendees/import-excel`, using the field name `file`. The importer accepts the template's `name`, `phone`, `optedIn`, `status`, and `waitlistRank` columns, skips the template title/instructions, and validates every attendee row before saving any of them.
+
 ## Sarvam scheduled calling
 
 The backend keeps the Sarvam scheduling key server-side and exposes these Rally endpoints:
@@ -95,10 +100,13 @@ The backend keeps the Sarvam scheduling key server-side and exposes these Rally 
 ```text
 POST /api/campaigns/:campaignId/sarvam/schedule
 POST /api/campaigns/:campaignId/sarvam/cohort
+POST /api/campaigns/:campaignId/sarvam/launch
 PUT  /api/campaigns/:campaignId/sarvam/status
 ```
 
 The schedule request needs `startTimestamp` and `endTimestamp` (ISO 8601); optional fields let the frontend override the Sarvam app, connection, caller number, retry configuration, and allowed schedule. The cohort request generates the CSV and Sarvam transformation mapping automatically. It supplies each row's phone number, `campaign_id`, and `attendee_id` to the agent. Status accepts `{ "action": "pause" }` or `{ "action": "resume" }`.
+
+For the frontend's single **Launch campaign** action, call `POST /api/campaigns/:campaignId/sarvam/launch` with `startTimestamp` and `endTimestamp`. It creates the Sarvam scheduled campaign if needed, uploads eligible attendees, and sets Rally campaign state to `ACTIVE` only after both steps succeed.
 
 For the current demo, set `SARVAM_FORCE_DEMO_RECIPIENT=true` and `SARVAM_DEMO_RECIPIENT_PHONE=+918123011069`. Every uploaded cohort row will call that number rather than attendee phone numbers. Set the flag to `false` or remove both variables to restore normal attendee calling.
 

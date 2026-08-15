@@ -1,8 +1,11 @@
 const express = require('express');
+const multer = require('multer');
+const { readXlsxRows } = require('../services/xlsxReader');
 const prisma = require('../db/prisma');
 const { saveCallResult, validateCallResult } = require('../services/callResults');
 
 const router = express.Router();
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
 const attendeeStatuses = new Set(['INVITED', 'CONFIRMED', 'UNCERTAIN', 'DECLINED', 'RELEASED', 'WAITLISTED', 'OFFERED']);
 const campaignStates = new Set(['DRAFT', 'ACTIVE', 'PAUSED', 'COMPLETED']);
 const isString = (value) => typeof value === 'string' && value.trim();
@@ -14,6 +17,22 @@ async function getCampaign(campaignId) {
 
 function attendeeData(attendee, eventId) {
   return { eventId, name: attendee.name.trim(), phone: attendee.phone || null, optedIn: attendee.optedIn === true, status: attendeeStatuses.has(attendee.status) ? attendee.status : 'INVITED', waitlistRank: Number.isInteger(attendee.waitlistRank) ? attendee.waitlistRank : null };
+}
+
+function spreadsheetBoolean(value) {
+  if (typeof value === 'boolean') return value;
+  return ['true', 'yes', 'y', '1'].includes(String(value || '').trim().toLowerCase());
+}
+
+function spreadsheetAttendee(row) {
+  const rawPhone = String(row.phone || row.phone_number || '').trim();
+  return {
+    name: String(row.name || row.attendee_name || '').trim(),
+    phone: rawPhone ? (/^\d{10,15}$/.test(rawPhone) ? `+${rawPhone}` : rawPhone) : null,
+    optedIn: spreadsheetBoolean(row.optedIn ?? row.opted_in),
+    status: String(row.status || 'INVITED').trim().toUpperCase(),
+    waitlistRank: row.waitlistRank ?? row.waitlist_rank ?? null
+  };
 }
 
 router.get('/', async (_req, res, next) => {
@@ -58,6 +77,33 @@ router.post('/:campaignId/attendees/import', async (req, res, next) => {
     if (!Array.isArray(attendees) || attendees.some((attendee) => !isString(attendee.name))) return res.status(400).json({ error: 'attendees with names are required' });
     const created = await prisma.attendee.createManyAndReturn({ data: attendees.map((attendee) => attendeeData(attendee, campaign.eventId)) });
     return res.status(201).json({ attendees: created, imported: created.length });
+  } catch (error) { return next(error); }
+});
+
+router.post('/:campaignId/attendees/import-excel', upload.single('file'), async (req, res, next) => {
+  try {
+    const campaign = await getCampaign(req.params.campaignId);
+    if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+    if (!req.file) return res.status(400).json({ error: 'Attach an .xlsx or .xls file in the multipart field named file' });
+    const sheetRows = readXlsxRows(req.file.buffer);
+    const headerRowIndex = sheetRows.findIndex((row) => row.map((cell) => String(cell ?? '').trim().toLowerCase()).includes('name') && row.map((cell) => String(cell ?? '').trim().toLowerCase()).some((cell) => ['phone', 'phone_number'].includes(cell)));
+    if (headerRowIndex < 0) return res.status(400).json({ error: 'The spreadsheet must contain a header row with name and phone columns' });
+    const headers = sheetRows[headerRowIndex].map((header) => String(header).trim());
+    const rows = [];
+    for (const row of sheetRows.slice(headerRowIndex + 1)) {
+      if (row.every((cell) => String(cell ?? '').trim() === '')) break;
+      rows.push(Object.fromEntries(headers.map((header, index) => [header, row[index] ?? ''])));
+    }
+    if (!rows.length) return res.status(400).json({ error: 'The spreadsheet has no attendee rows' });
+    const attendees = rows.map(spreadsheetAttendee);
+    const invalidRows = attendees
+      .map((attendee, index) => ({ attendee, row: index + 2 }))
+      .filter(({ attendee }) => !attendee.name || !attendeeStatuses.has(attendee.status));
+    if (invalidRows.length) {
+      return res.status(400).json({ error: 'Invalid attendee spreadsheet rows', invalidRows: invalidRows.map(({ row }) => row) });
+    }
+    const created = await prisma.attendee.createManyAndReturn({ data: attendees.map((attendee) => attendeeData(attendee, campaign.eventId)) });
+    return res.status(201).json({ imported: created.length, attendees: created });
   } catch (error) { return next(error); }
 });
 

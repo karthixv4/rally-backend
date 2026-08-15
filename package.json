@@ -20,8 +20,11 @@
     "@prisma/client": "^6.0.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.0",
+    "fast-xml-parser": "^5.2.5",
+    "fflate": "^0.8.2",
     "express": "^4.21.0",
     "helmet": "^8.0.0",
+    "multer": "^2.0.2",
     "morgan": "^1.10.0"
   },
   "devDependencies": {
