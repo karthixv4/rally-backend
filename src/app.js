@@ -8,10 +8,28 @@ const taskRoutes = require('./routes/tasks');
 const sarvamSchedulingRoutes = require('./routes/sarvamScheduling');
 
 const app = express();
+const configuredOrigins = (process.env.CORS_ORIGINS || 'https://rally-frontend-nine.vercel.app')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+const isLocalOrigin = (origin) => /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
+const corsOptions = {
+  origin(origin, callback) {
+    // Requests without an Origin header include direct API calls, health checks, and Sarvam webhooks.
+    if (!origin || configuredOrigins.includes(origin) || isLocalOrigin(origin)) {
+      return callback(null, true);
+    }
+    return callback(new Error(`CORS origin not allowed: ${origin}`));
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PATCH', 'PUT', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+};
 
 app.disable('x-powered-by');
 app.use(helmet());
-app.use(cors());
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 app.use(express.json());
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 

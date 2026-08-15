@@ -2,6 +2,8 @@
 
 Express.js backend starter for Rally, an Event Readiness Agent. It uses JavaScript, Prisma, and PostgreSQL-compatible Neon.
 
+The API accepts browser requests from `https://rally-frontend-nine.vercel.app` and any localhost port by default. Add other production origins as comma-separated values in `CORS_ORIGINS`.
+
 ## Run locally
 
 1. Copy `.env.example` to `.env` and replace `DATABASE_URL` with your Neon pooled connection string.
