@@ -86,6 +86,18 @@ POST                              /api/campaigns/:campaignId/call-events
 
 The response endpoints accept the Sarvam call fields in `snake_case`: `attendance_status`, `transport_mode`, `arrival_slot`, `decline_reason`, `seat_release`, `substitute_attendee`, `escalation_flag`, `call_summary`, `food_preference`, `parking_needed`, `dietary_requirements`, `accessibility_needs`, `team_status`, and `transcript`.
 
+## Sarvam scheduled calling
+
+The backend keeps the Sarvam scheduling key server-side and exposes these Rally endpoints:
+
+```text
+POST /api/campaigns/:campaignId/sarvam/schedule
+POST /api/campaigns/:campaignId/sarvam/cohort
+PUT  /api/campaigns/:campaignId/sarvam/status
+```
+
+The schedule request needs `startTimestamp` and `endTimestamp` (ISO 8601); optional fields let the frontend override the Sarvam app, connection, caller number, retry configuration, and allowed schedule. The cohort request generates the CSV and Sarvam transformation mapping automatically. It supplies each row's phone number, `campaign_id`, and `attendee_id` to the agent. Status accepts `{ "action": "pause" }` or `{ "action": "resume" }`.
+
 Example response:
 
 ```json

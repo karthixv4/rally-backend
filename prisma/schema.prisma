@@ -89,6 +89,7 @@ model Campaign {
   deadline           DateTime?
   state              CampaignState @default(DRAFT)
   sessionSlotOptions String[]  @default([])
+  sarvamCampaignId  String?   @unique
   createdAt          DateTime  @default(now())
   updatedAt          DateTime  @updatedAt
   event              Event     @relation(fields: [eventId], references: [id], onDelete: Cascade)
