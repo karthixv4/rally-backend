@@ -111,6 +111,8 @@ For the frontend's single **Launch campaign** action, call `POST /api/campaigns/
 
 `POST /api/campaigns/:campaignId/sarvam/call-now` creates one immediate Sarvam outbound call. Its optional JSON body accepts `{ "attendeeId": "..." }`; otherwise Rally uses the first eligible opted-in attendee. It honours the demo-recipient override and passes event/attendee variables plus `campaign_id` and `attendee_id` to the agent. Set `SARVAM_OUTBOUND_WEBHOOK_URL` to the public `POST /api/voice/call-results` URL. Rally appends its server-side webhook token automatically, so Sarvam can safely post the result back without exposing credentials to the frontend.
 
+Instant outbound uses `SARVAM_OUTBOUND_APP_VERSION`, which defaults to `2` independently of the scheduled-campaign app version. Set it to the published version of the Sarvam agent used for instant outbound if your workspace differs.
+
 For the current demo, set `SARVAM_FORCE_DEMO_RECIPIENT=true` and `SARVAM_DEMO_RECIPIENT_PHONE=+918123011069`. Every uploaded cohort row will call that number rather than attendee phone numbers. Set the flag to `false` or remove both variables to restore normal attendee calling.
 
 Example response:

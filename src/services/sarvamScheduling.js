@@ -49,7 +49,9 @@ async function sarvamFetch(url, options = {}) {
   let body;
   try { body = raw ? JSON.parse(raw) : null; } catch { body = raw; }
   if (!response.ok) {
-    const error = new Error(`Sarvam scheduling API returned ${response.status}`);
+    const validationDetail = body?.error?.data || body?.detail;
+    const detailText = validationDetail ? `: ${JSON.stringify(validationDetail)}` : '';
+    const error = new Error(`Sarvam scheduling API returned ${response.status}${detailText}`);
     error.status = response.status;
     error.details = body;
     throw error;
@@ -167,7 +169,7 @@ async function triggerImmediateCall(campaign, attendee) {
   const payload = {
     app_config: {
       app_id: process.env.SARVAM_APP_ID,
-      app_version: Number(process.env.SARVAM_APP_VERSION || 1),
+      app_version: Number(process.env.SARVAM_OUTBOUND_APP_VERSION || 2),
       app_type: 'agent',
       connection_config: { connection_id: connectionId, agent_phone_number: callerNumber },
       agent_variables: {

@@ -52,7 +52,7 @@ app.use((_req, res) => {
 });
 
 app.use((err, _req, res, _next) => {
-  console.error(err);
+  console.error(err.details ? `${err.stack}\nSarvam response: ${JSON.stringify(err.details, null, 2)}` : err);
   const status = Number.isInteger(err.status) && err.status >= 400 && err.status < 500 ? err.status : 500;
   const details = err.details?.error?.data;
   res.status(status).json({
