@@ -55,6 +55,8 @@ Set `SARVAM_WEBHOOK_SECRET` in your environment. The Sarvam-side connector or yo
 
 `GET /api/voice/demo-call-details` returns placeholder event and attendee values for a quick voice-agent demo. It uses the same Bearer-token protection and is intentionally marked for removal once `call-context` is used in production.
 
+It also returns temporary `campaign_id` and `attendee_id` values. Configure Sarvam to retain those as call variables and include them in its later `POST /api/voice/call-results` payload.
+
 ### Store a Sarvam call result
 
 `POST /api/voice/call-results` stores the normalized values Sarvam returns after a call. It requires the same Bearer token and accepts `campaign_id`, `attendee_id`, `attendance_status`, optional transport/arrival or decline fields, `escalation_flag`, and `call_summary`. A confirmed, declined, or uncertain outcome updates the attendee's operational status too.

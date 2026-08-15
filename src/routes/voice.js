@@ -8,6 +8,9 @@ const router = express.Router();
 // Temporary demo endpoint: remove after the campaign-backed call-context flow is in use.
 router.get('/demo-call-details', requireSarvamSecret, (_req, res) => {
   return res.json({
+    // Temporary IDs for the hardcoded demo campaign; replace with dialer variables later.
+    campaign_id: 'cmstykcym0002lb7cn995z117',
+    attendee_id: 'cmstykd250003lb7coo2nbsqw',
     event_name: 'Rally Community Build Hackathon',
     event_date: 'Saturday, 30 August 2026',
     event_venue: 'The Innovation Hub, Bengaluru',
