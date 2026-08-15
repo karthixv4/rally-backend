@@ -40,28 +40,6 @@ function normalizeResultPayload(payload) {
   return { ...(payload || {}), escalation_flag: toBoolean(payload?.escalation_flag) };
 }
 
-// Temporary demo endpoint: remove after the campaign-backed call-context flow is in use.
-router.get('/demo-call-details', requireSarvamSecret, async (_req, res, next) => {
-  try {
-    // Admin-only test context. The agent fetches these values itself at call start;
-    // they are not Sarvam app variables and are not part of the production bulk flow.
-    const campaignId = process.env.SARVAM_ADMIN_TEST_CAMPAIGN_ID || 'cmstykcym0002lb7cn995z117';
-    const attendeeId = process.env.SARVAM_ADMIN_TEST_ATTENDEE_ID || 'cmstykd250003lb7coo2nbsqw';
-    const campaign = await prisma.campaign.findUnique({ where: { id: campaignId }, include: { event: true } });
-    const attendee = await prisma.attendee.findFirst({ where: { id: attendeeId, eventId: campaign?.eventId } });
-    if (!campaign || !attendee) return res.status(500).json({ error: 'Configure a valid SARVAM_ADMIN_TEST_CAMPAIGN_ID and SARVAM_ADMIN_TEST_ATTENDEE_ID' });
-    return res.json({
-      campaign_id: campaign.id,
-      attendee_id: attendee.id,
-      event_name: campaign.event.name,
-      event_date: campaign.event.startsAt ? new Intl.DateTimeFormat('en-IN', { dateStyle: 'full', timeZone: 'Asia/Kolkata' }).format(campaign.event.startsAt) : 'the event date to be confirmed',
-      event_venue: campaign.event.venue || 'the venue to be confirmed',
-      attendee_name: attendee.name,
-      session_slot_options: campaign.sessionSlotOptions
-    });
-  } catch (error) { return next(error); }
-});
-
 router.post('/call-results', requireSarvamSecret, async (req, res, next) => {
   const traceId = webhookTraceId();
   res.set('X-Rally-Webhook-Trace', traceId);
@@ -89,6 +67,27 @@ router.post('/call-results', requireSarvamSecret, async (req, res, next) => {
     console.error('[Rally voice result failed]', JSON.stringify({ traceId, message: error.message, received: resultPayloadDebug(req.body) }));
     return next(error);
   }
+});
+
+router.get('/call-context', requireSarvamSecret, async (req, res, next) => {
+  try {
+    const campaignId = req.query.campaign_id;
+    const attendeeId = req.query.attendee_id;
+    if (!campaignId || !attendeeId) return res.status(400).json({ error: 'campaign_id and attendee_id are required' });
+    const campaign = await prisma.campaign.findUnique({ where: { id: campaignId }, include: { event: true } });
+    const attendee = await prisma.attendee.findFirst({ where: { id: attendeeId, eventId: campaign?.eventId } });
+    if (!campaign || !attendee) return res.status(404).json({ error: 'Campaign or attendee not found' });
+    if (!attendee.optedIn) return res.status(403).json({ error: 'Attendee has not opted in to voice outreach' });
+    return res.json({
+      campaign_id: campaign.id,
+      attendee_id: attendee.id,
+      event_name: campaign.event.name,
+      event_date: campaign.event.startsAt ? new Intl.DateTimeFormat('en-IN', { dateStyle: 'full', timeZone: 'Asia/Kolkata' }).format(campaign.event.startsAt) : 'the event date to be confirmed',
+      event_venue: campaign.event.venue || 'the venue to be confirmed',
+      attendee_name: attendee.name,
+      session_slot_options: campaign.sessionSlotOptions
+    });
+  } catch (error) { return next(error); }
 });
 
 router.post('/call-context', requireSarvamSecret, async (req, res, next) => {

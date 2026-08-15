@@ -22,7 +22,7 @@ const corsOptions = {
     return callback(new Error(`CORS origin not allowed: ${origin}`));
   },
   credentials: true,
-  methods: ['GET', 'POST', 'PATCH', 'PUT', 'OPTIONS'],
+  methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 };
 
@@ -32,6 +32,14 @@ app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
 app.use(express.json());
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
+
+app.get('/', (_req, res) => {
+  res.status(200).json({
+    service: 'rally-backend',
+    status: 'ok',
+    health: '/health'
+  });
+});
 
 app.get('/health', (_req, res) => {
   res.status(200).json({

@@ -3,6 +3,7 @@ const multer = require('multer');
 const { readXlsxRows } = require('../services/xlsxReader');
 const prisma = require('../db/prisma');
 const { saveCallResult, validateCallResult } = require('../services/callResults');
+const { getCampaignStatus, updateCampaignStatus } = require('../services/sarvamScheduling');
 
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
@@ -67,6 +68,56 @@ router.patch('/:campaignId', async (req, res, next) => {
     if (campaignPatch.state && !campaignStates.has(campaignPatch.state)) return res.status(400).json({ error: 'Invalid campaign state' });
     const updated = await prisma.$transaction(async (tx) => { if (Object.keys(event).length) await tx.event.update({ where: { id: campaign.eventId }, data: event }); return tx.campaign.update({ where: { id: campaign.id }, data: campaignPatch, include: campaignInclude }); });
     return res.json({ campaign: updated });
+  } catch (error) { return next(error); }
+});
+
+router.delete('/:campaignId', async (req, res, next) => {
+  try {
+    const campaign = await prisma.campaign.findUnique({
+      where: { id: req.params.campaignId },
+      select: { id: true, eventId: true, sarvamCampaignId: true }
+    });
+    if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+
+    // Do not leave a live external dialer running after its Rally campaign is gone.
+    let sarvamSchedulePaused = false;
+    let sarvamScheduleAlreadyEnded = false;
+    if (campaign.sarvamCampaignId) {
+      try {
+        const sarvamCampaign = await getCampaignStatus(campaign.sarvamCampaignId);
+        if (['ended', 'cancelled'].includes(String(sarvamCampaign.status || '').toLowerCase())) {
+          sarvamScheduleAlreadyEnded = true;
+        } else {
+          await updateCampaignStatus(campaign.sarvamCampaignId, 'pause');
+          sarvamSchedulePaused = true;
+        }
+      } catch (error) {
+        return res.status(409).json({
+          error: 'Campaign was not deleted because Rally could not pause its Sarvam schedule. No Rally data was removed.',
+          details: error.message
+        });
+      }
+    }
+
+    const campaignCountForEvent = await prisma.campaign.count({ where: { eventId: campaign.eventId } });
+    await prisma.$transaction(async (tx) => {
+      if (campaignCountForEvent === 1) {
+        // The normal Rally setup creates one Event per Campaign. Cascades remove every
+        // attendee, response, activity record, task, seat, and waitlist offer with it.
+        await tx.event.delete({ where: { id: campaign.eventId } });
+        return;
+      }
+
+      // Preserve a deliberately shared event, but remove every record owned by this campaign.
+      await tx.followUp.deleteMany({ where: { campaignId: campaign.id } });
+      await tx.campaign.delete({ where: { id: campaign.id } });
+    });
+
+    return res.json({
+      message: 'Campaign and all associated Rally data were deleted',
+      sarvamSchedulePaused,
+      sarvamScheduleAlreadyEnded
+    });
   } catch (error) { return next(error); }
 });
 

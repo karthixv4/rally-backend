@@ -1,5 +1,10 @@
 const baseUrl = 'https://apps.sarvam.ai/api/scheduling/v1';
-const outboundBaseUrl = 'https://apps.sarvam.ai/api/outbounds/v1';
+const defaultAllowedSchedule = {
+  timezone: 'Asia/Kolkata',
+  allowed_start_time: '09:00',
+  allowed_end_time: '18:00',
+  allowed_days: ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+};
 
 function config() {
   const required = ['SARVAM_SCHEDULING_API_KEY', 'SARVAM_ORG_ID', 'SARVAM_WORKSPACE_ID', 'SARVAM_APP_ID', 'SARVAM_CONNECTION_ID', 'SARVAM_CALLER_NUMBER'];
@@ -12,11 +17,6 @@ function config() {
 function campaignUrl(sarvamCampaignId = '') {
   const { orgId, workspaceId } = config();
   return `${baseUrl}/orgs/${orgId}/workspaces/${workspaceId}/campaigns${sarvamCampaignId ? `/${sarvamCampaignId}` : ''}`;
-}
-
-function outboundUrl() {
-  const { orgId, workspaceId } = config();
-  return `${outboundBaseUrl}/orgs/${orgId}/workspaces/${workspaceId}/outbounds`;
 }
 
 function validateScheduleWindow(startTimestamp, endTimestamp) {
@@ -63,25 +63,25 @@ function csvEscape(value) {
   return `"${String(value ?? '').replace(/"/g, '""')}"`;
 }
 
-function buildCohortCsv(attendees) {
-  const rows = [['attendee_id', 'attendee_name', 'phone_number']];
-  const useDemoRecipient = process.env.SARVAM_FORCE_DEMO_RECIPIENT === 'true';
-  const demoRecipient = process.env.SARVAM_DEMO_RECIPIENT_PHONE;
-  if (useDemoRecipient && !demoRecipient) {
-    throw new Error('SARVAM_DEMO_RECIPIENT_PHONE is required when SARVAM_FORCE_DEMO_RECIPIENT is true');
-  }
+function buildCohortCsv(campaignId, attendees) {
+  const rows = [['campaign_id', 'attendee_id', 'attendee_name', 'phone_number']];
   attendees.forEach((attendee) => rows.push([
+    campaignId,
     attendee.id,
     attendee.name,
-    useDemoRecipient ? demoRecipient : attendee.phone || ''
+    attendee.phone || ''
   ]));
   return rows.map((row) => row.map(csvEscape).join(',')).join('\n');
 }
 
 const defaultCohortTransformation = {
   phone_number: { column_name: 'phone_number' },
-  // This associates Sarvam's cohort row with Rally without exposing it as an agent variable.
-  user_identifier: { column_name: 'attendee_id', required: true }
+  user_identifier: { column_name: 'attendee_id', required: true },
+  // Configure these two input variables in the Sarvam agent for real cohort calls.
+  app_variables: {
+    campaign_id: { column_name: 'campaign_id' },
+    attendee_id: { column_name: 'attendee_id' }
+  }
 };
 
 async function createScheduledCampaign(campaign, options) {
@@ -104,15 +104,15 @@ async function createScheduledCampaign(campaign, options) {
     },
     start_timestamp: startTimestamp,
     end_timestamp: endTimestamp,
-    allowed_schedule: options.allowedSchedule || { timezone: 'Asia/Kolkata', allowed_start_time: '09:00', allowed_end_time: '18:00', allowed_days: ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'] }
+    allowed_schedule: options.allowedSchedule || defaultAllowedSchedule
   };
   return sarvamFetch(campaignUrl(), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
 }
 
-async function uploadCohort(sarvamCampaignId, attendees, name, cohortTransformation = defaultCohortTransformation) {
+async function uploadCohort(sarvamCampaignId, campaignId, attendees, name, cohortTransformation = defaultCohortTransformation) {
   const form = new FormData();
   form.append('name', name);
-  form.append('cohort_file', new Blob([buildCohortCsv(attendees)], { type: 'text/csv' }), 'rally-attendees.csv');
+  form.append('cohort_file', new Blob([buildCohortCsv(campaignId, attendees)], { type: 'text/csv' }), 'rally-attendees.csv');
   form.append('cohort_transformation_file', new Blob([JSON.stringify(cohortTransformation)], { type: 'application/json' }), 'transform.json');
   return sarvamFetch(`${campaignUrl(sarvamCampaignId)}/cohorts/upload`, { method: 'POST', body: form });
 }
@@ -121,66 +121,8 @@ async function updateCampaignStatus(sarvamCampaignId, action) {
   return sarvamFetch(`${campaignUrl(sarvamCampaignId)}/status`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action }) });
 }
 
-function formatEventDate(startsAt) {
-  if (!startsAt) return 'the event date to be confirmed';
-  return new Intl.DateTimeFormat('en-IN', { dateStyle: 'full', timeZone: 'Asia/Kolkata' }).format(new Date(startsAt));
+async function getCampaignStatus(sarvamCampaignId) {
+  return sarvamFetch(campaignUrl(sarvamCampaignId));
 }
 
-function outboundRecipient(attendee) {
-  if (process.env.SARVAM_FORCE_DEMO_RECIPIENT === 'true') {
-    if (!process.env.SARVAM_DEMO_RECIPIENT_PHONE) throw new Error('SARVAM_DEMO_RECIPIENT_PHONE is required when SARVAM_FORCE_DEMO_RECIPIENT is true');
-    return process.env.SARVAM_DEMO_RECIPIENT_PHONE;
-  }
-  if (!attendee.phone) {
-    const error = new Error('The selected attendee has no phone number');
-    error.status = 400;
-    throw error;
-  }
-  return attendee.phone;
-}
-
-function outboundWebhookConfig(campaign, attendee) {
-  const url = process.env.SARVAM_OUTBOUND_WEBHOOK_URL
-    || process.env.PUBLIC_API_URL && `${process.env.PUBLIC_API_URL.replace(/\/$/, '')}/api/voice/call-results`
-    || process.env.VERCEL_URL && `https://${process.env.VERCEL_URL}/api/voice/call-results`;
-  const token = process.env.SARVAM_OUTBOUND_WEBHOOK_TOKEN || process.env.SARVAM_WEBHOOK_SECRET;
-  if (!url || !token) {
-    const error = new Error('Set SARVAM_OUTBOUND_WEBHOOK_URL (or PUBLIC_API_URL) and a webhook token before making an immediate outbound call');
-    error.status = 500;
-    throw error;
-  }
-  const callbackUrl = new URL(url);
-  callbackUrl.searchParams.set('token', token);
-  return { url: callbackUrl.toString(), metadata: { lead_id: attendee.id, campaign_id: campaign.id, attendee_id: attendee.id } };
-}
-
-async function triggerImmediateCall(campaign, attendee) {
-  const connectionId = process.env.SARVAM_CONNECTION_ID;
-  const callerNumber = process.env.SARVAM_CALLER_NUMBER;
-  const sessionSlots = Array.isArray(campaign.sessionSlotOptions) && campaign.sessionSlotOptions.length
-    ? campaign.sessionSlotOptions.join(', ')
-    : 'No session preference is required.';
-  const initialBotMessage = process.env.SARVAM_INITIAL_BOT_MESSAGE;
-  const initialStateName = process.env.SARVAM_INITIAL_STATE_NAME;
-  const payload = {
-    app_config: {
-      app_id: process.env.SARVAM_APP_ID,
-      app_version: Number(process.env.SARVAM_OUTBOUND_APP_VERSION || 2),
-      app_type: 'agent',
-      connection_config: { connection_id: connectionId, agent_phone_number: callerNumber },
-      agent_variables: {
-        arrival_slot: '', attendance_status: '', attendee_name: attendee.name, call_summary: '', decline_reason: '', escalation_flag: '',
-        event_date: formatEventDate(campaign.event.startsAt), event_name: campaign.event.name, event_venue: campaign.event.venue || 'the venue to be confirmed',
-        gender: '', seat_release: '', session_slot_options: sessionSlots, substitute_attendee: '', transport_mode: '',
-        // The demo agent fetches hardcoded campaign and attendee details from Rally at call start.
-        // Do not add campaign_id or attendee_id here: they are not configured app variables in Sarvam.
-      },
-      ...(initialBotMessage || initialStateName ? { app_overrides: { ...(initialBotMessage ? { initial_bot_message: initialBotMessage } : {}), ...(initialStateName ? { initial_state_name: initialStateName } : {}) } } : {})
-    },
-    user_config: { user_phone_number: outboundRecipient(attendee) },
-    webhook_config: outboundWebhookConfig(campaign, attendee)
-  };
-  return sarvamFetch(outboundUrl(), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-}
-
-module.exports = { createScheduledCampaign, updateCampaignStatus, uploadCohort, triggerImmediateCall };
+module.exports = { createScheduledCampaign, updateCampaignStatus, getCampaignStatus, uploadCohort, defaultAllowedSchedule };
