@@ -24,6 +24,18 @@ function resultPayloadDebug(payload) {
   };
 }
 
+function toBoolean(value) {
+  if (typeof value === 'boolean') return value;
+  if (typeof value !== 'string') return value;
+  if (value.trim().toLowerCase() === 'true') return true;
+  if (value.trim().toLowerCase() === 'false') return false;
+  return value;
+}
+
+function normalizeResultPayload(payload) {
+  return { ...(payload || {}), escalation_flag: toBoolean(payload?.escalation_flag) };
+}
+
 // Temporary demo endpoint: remove after the campaign-backed call-context flow is in use.
 router.get('/demo-call-details', requireSarvamSecret, async (_req, res, next) => {
   try {
@@ -50,9 +62,10 @@ router.post('/call-results', requireSarvamSecret, async (req, res, next) => {
   const traceId = webhookTraceId();
   res.set('X-Rally-Webhook-Trace', traceId);
   try {
-    const validationError = validateCallResult(req.body);
+    const resultPayload = normalizeResultPayload(req.body);
+    const validationError = validateCallResult(resultPayload);
     if (validationError) {
-      console.warn('[Rally voice result rejected]', JSON.stringify({ traceId, reason: validationError, received: resultPayloadDebug(req.body) }));
+      console.warn('[Rally voice result rejected]', JSON.stringify({ traceId, reason: validationError, received: resultPayloadDebug(resultPayload) }));
       return res.status(400).json({
         error: validationError,
         code: 'INVALID_CALL_RESULT',
@@ -61,12 +74,12 @@ router.post('/call-results', requireSarvamSecret, async (req, res, next) => {
         note: 'attendance_status must be confirmed, declined, uncertain, wrong_number, voicemail, or call_disconnected'
       });
     }
-    const response = await saveCallResult(req.body);
+    const response = await saveCallResult(resultPayload);
     if (!response) {
-      console.warn('[Rally voice result not matched]', JSON.stringify({ traceId, received: resultPayloadDebug(req.body) }));
+      console.warn('[Rally voice result not matched]', JSON.stringify({ traceId, received: resultPayloadDebug(resultPayload) }));
       return res.status(404).json({ error: 'Campaign or attendee not found', code: 'CALL_RESULT_NOT_MATCHED', traceId });
     }
-    console.info('[Rally voice result saved]', JSON.stringify({ traceId, campaignId: req.body.campaign_id, attendeeId: req.body.attendee_id, attendanceStatus: req.body.attendance_status }));
+    console.info('[Rally voice result saved]', JSON.stringify({ traceId, campaignId: resultPayload.campaign_id, attendeeId: resultPayload.attendee_id, attendanceStatus: resultPayload.attendance_status }));
     return res.status(201).json({ message: 'Call result saved', response });
   } catch (error) {
     console.error('[Rally voice result failed]', JSON.stringify({ traceId, message: error.message, received: resultPayloadDebug(req.body) }));
