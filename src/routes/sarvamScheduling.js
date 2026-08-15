@@ -96,10 +96,16 @@ router.put('/:campaignId/sarvam/status', async (req, res, next) => {
     if (!['pause', 'resume'].includes(req.body.action)) return res.status(400).json({ error: 'action must be pause or resume' });
     const campaign = await campaignForScheduling(req.params.campaignId);
     if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
-    if (!campaign.sarvamCampaignId) return res.status(409).json({ error: 'Campaign is not scheduled with Sarvam' });
-    const sarvamStatus = await updateCampaignStatus(campaign.sarvamCampaignId, req.body.action);
+    const isScheduled = Boolean(campaign.sarvamCampaignId);
+    const sarvamStatus = isScheduled ? await updateCampaignStatus(campaign.sarvamCampaignId, req.body.action) : null;
     const updatedCampaign = await prisma.campaign.update({ where: { id: campaign.id }, data: { state: req.body.action === 'pause' ? 'PAUSED' : 'ACTIVE' }, include: { event: true } });
-    return res.json({ sarvamStatus, campaign: updatedCampaign });
+    return res.json({
+      sarvamStatus,
+      campaign: updatedCampaign,
+      message: isScheduled
+        ? `Campaign ${req.body.action === 'pause' ? 'paused' : 'resumed'} in Sarvam`
+        : `Campaign ${req.body.action === 'pause' ? 'paused' : 'resumed'} locally; no Sarvam schedule exists yet`
+    });
   } catch (error) { return next(error); }
 });
 
