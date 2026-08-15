@@ -20,16 +20,20 @@ function resultPayloadDebug(payload) {
     attendeeId: body.attendee_id ?? null,
     attendanceStatus: body.attendance_status ?? null,
     seatRelease: body.seat_release ?? null,
-    escalationFlagType: body.escalation_flag === undefined ? 'missing' : typeof body.escalation_flag
+    escalationFlagType: body.escalation_flag === undefined ? 'missing' : typeof body.escalation_flag,
+    escalationFlagValue: typeof body.escalation_flag === 'string' ? body.escalation_flag.slice(0, 40) : body.escalation_flag ?? null
   };
 }
 
 function toBoolean(value) {
   if (typeof value === 'boolean') return value;
   if (typeof value !== 'string') return value;
-  if (value.trim().toLowerCase() === 'true') return true;
-  if (value.trim().toLowerCase() === 'false') return false;
-  return value;
+  const normalized = value.trim().toLowerCase();
+  if (['true', 'yes', '1'].includes(normalized)) return true;
+  if (['false', 'no', '0', ''].includes(normalized)) return false;
+  // An escalation is opt-in. A non-standard string should not block a completed call result.
+  console.warn('[Rally voice result unknown escalation flag]', JSON.stringify({ value: value.slice(0, 40) }));
+  return false;
 }
 
 function normalizeResultPayload(payload) {
