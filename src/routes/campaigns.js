@@ -1,83 +1,131 @@
 const express = require('express');
 const prisma = require('../db/prisma');
+const { saveCallResult, validateCallResult } = require('../services/callResults');
 
 const router = express.Router();
+const attendeeStatuses = new Set(['INVITED', 'CONFIRMED', 'UNCERTAIN', 'DECLINED', 'RELEASED', 'WAITLISTED', 'OFFERED']);
+const campaignStates = new Set(['DRAFT', 'ACTIVE', 'PAUSED', 'COMPLETED']);
+const isString = (value) => typeof value === 'string' && value.trim();
+const campaignInclude = { event: { include: { seats: true } }, _count: { select: { responses: true, followUps: true, seatOffers: true } } };
 
-function isString(value) {
-  return typeof value === 'string' && value.trim().length > 0;
+async function getCampaign(campaignId) {
+  return prisma.campaign.findUnique({ where: { id: campaignId }, include: campaignInclude });
 }
+
+function attendeeData(attendee, eventId) {
+  return { eventId, name: attendee.name.trim(), phone: attendee.phone || null, optedIn: attendee.optedIn === true, status: attendeeStatuses.has(attendee.status) ? attendee.status : 'INVITED', waitlistRank: Number.isInteger(attendee.waitlistRank) ? attendee.waitlistRank : null };
+}
+
+router.get('/', async (_req, res, next) => {
+  try { res.json({ campaigns: await prisma.campaign.findMany({ include: campaignInclude, orderBy: { createdAt: 'desc' } }) }); } catch (error) { next(error); }
+});
 
 router.post('/', async (req, res, next) => {
   try {
     const { event, campaign, attendees = [] } = req.body;
-
-    if (!event || !campaign || !isString(event.name) || !isString(campaign.name)) {
-      return res.status(400).json({
-        error: 'event.name and campaign.name are required'
-      });
-    }
-
-    if (!Array.isArray(attendees) || attendees.some((attendee) => !isString(attendee.name))) {
-      return res.status(400).json({
-        error: 'attendees must be an array, and every attendee needs a name'
-      });
-    }
-
+    if (!event || !campaign || !isString(event.name) || !isString(campaign.name)) return res.status(400).json({ error: 'event.name and campaign.name are required' });
+    if (!Array.isArray(attendees) || attendees.some((attendee) => !isString(attendee.name))) return res.status(400).json({ error: 'attendees must be an array and every attendee needs a name' });
     const result = await prisma.$transaction(async (tx) => {
-      const createdEvent = await tx.event.create({
-        data: {
-          name: event.name.trim(),
-          startsAt: event.startsAt ? new Date(event.startsAt) : null,
-          venue: event.venue || null,
-          schedule: event.schedule || null,
-          parkingInstructions: event.parkingInstructions || null,
-          helpContact: event.helpContact || null,
-          capacity: Number.isInteger(event.capacity) ? event.capacity : null
-        }
-      });
-
-      const createdCampaign = await tx.campaign.create({
-        data: {
-          eventId: createdEvent.id,
-          name: campaign.name.trim(),
-          attendanceEnabled: campaign.attendanceEnabled !== false,
-          parkingEnabled: campaign.parkingEnabled === true,
-          foodEnabled: campaign.foodEnabled === true,
-          languages: Array.isArray(campaign.languages) && campaign.languages.length
-            ? campaign.languages
-            : ['en'],
-          tone: campaign.tone || 'helpful',
-          deadline: campaign.deadline ? new Date(campaign.deadline) : null
-        }
-      });
-
-      if (attendees.length) {
-        await tx.attendee.createMany({
-          data: attendees.map((attendee) => ({
-            eventId: createdEvent.id,
-            name: attendee.name.trim(),
-            phone: attendee.phone || null,
-            optedIn: attendee.optedIn === true,
-            status: attendee.status || 'INVITED',
-            waitlistRank: Number.isInteger(attendee.waitlistRank)
-              ? attendee.waitlistRank
-              : null
-          }))
-        });
-      }
-
-      return { event: createdEvent, campaign: createdCampaign };
+      const createdEvent = await tx.event.create({ data: { name: event.name.trim(), startsAt: event.startsAt ? new Date(event.startsAt) : null, venue: event.venue || null, schedule: event.schedule || null, parkingInstructions: event.parkingInstructions || null, helpContact: event.helpContact || null, capacity: Number.isInteger(event.capacity) ? event.capacity : null } });
+      const createdCampaign = await tx.campaign.create({ data: { eventId: createdEvent.id, name: campaign.name.trim(), attendanceEnabled: campaign.attendanceEnabled !== false, parkingEnabled: campaign.parkingEnabled === true, foodEnabled: campaign.foodEnabled === true, languages: Array.isArray(campaign.languages) && campaign.languages.length ? campaign.languages : ['en'], tone: campaign.tone || 'helpful', deadline: campaign.deadline ? new Date(campaign.deadline) : null, state: campaignStates.has(campaign.state) ? campaign.state : 'DRAFT', sessionSlotOptions: Array.isArray(campaign.sessionSlotOptions) ? campaign.sessionSlotOptions : [] } });
+      const createdAttendees = attendees.length ? await tx.attendee.createManyAndReturn({ data: attendees.map((attendee) => attendeeData(attendee, createdEvent.id)) }) : [];
+      if (createdEvent.capacity) await tx.seat.createMany({ data: Array.from({ length: createdEvent.capacity }, (_, index) => ({ eventId: createdEvent.id, seatNumber: index + 1 })) });
+      return { event: createdEvent, campaign: createdCampaign, attendees: createdAttendees };
     });
-
-    return res.status(201).json({
-      message: 'Campaign created',
-      event: result.event,
-      campaign: result.campaign,
-      attendeeCount: attendees.length
-    });
-  } catch (error) {
-    return next(error);
-  }
+    return res.status(201).json({ message: 'Campaign created', ...result, attendeeCount: result.attendees.length });
+  } catch (error) { return next(error); }
 });
+
+router.get('/:campaignId', async (req, res, next) => {
+  try { const campaign = await getCampaign(req.params.campaignId); return campaign ? res.json({ campaign }) : res.status(404).json({ error: 'Campaign not found' }); } catch (error) { return next(error); }
+});
+
+router.patch('/:campaignId', async (req, res, next) => {
+  try {
+    const campaign = await getCampaign(req.params.campaignId);
+    if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+    const { event = {}, ...campaignPatch } = req.body;
+    if (campaignPatch.state && !campaignStates.has(campaignPatch.state)) return res.status(400).json({ error: 'Invalid campaign state' });
+    const updated = await prisma.$transaction(async (tx) => { if (Object.keys(event).length) await tx.event.update({ where: { id: campaign.eventId }, data: event }); return tx.campaign.update({ where: { id: campaign.id }, data: campaignPatch, include: campaignInclude }); });
+    return res.json({ campaign: updated });
+  } catch (error) { return next(error); }
+});
+
+router.post('/:campaignId/attendees/import', async (req, res, next) => {
+  try {
+    const campaign = await getCampaign(req.params.campaignId); const attendees = req.body.attendees;
+    if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+    if (!Array.isArray(attendees) || attendees.some((attendee) => !isString(attendee.name))) return res.status(400).json({ error: 'attendees with names are required' });
+    const created = await prisma.attendee.createManyAndReturn({ data: attendees.map((attendee) => attendeeData(attendee, campaign.eventId)) });
+    return res.status(201).json({ attendees: created, imported: created.length });
+  } catch (error) { return next(error); }
+});
+
+router.get('/:campaignId/attendees', async (req, res, next) => {
+  try {
+    const campaign = await getCampaign(req.params.campaignId); if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+    const where = { eventId: campaign.eventId, ...(req.query.status ? { status: req.query.status } : {}) };
+    return res.json({ attendees: await prisma.attendee.findMany({ where, include: { responses: { take: 1, orderBy: { createdAt: 'desc' } }, seat: true }, orderBy: { createdAt: 'desc' } }) });
+  } catch (error) { return next(error); }
+});
+
+router.get('/:campaignId/attendees/:attendeeId', async (req, res, next) => {
+  try {
+    const campaign = await getCampaign(req.params.campaignId);
+    const attendee = campaign && await prisma.attendee.findFirst({ where: { id: req.params.attendeeId, eventId: campaign.eventId }, include: { responses: { orderBy: { createdAt: 'desc' } }, callEvents: { orderBy: { occurredAt: 'desc' } }, seat: true } });
+    return attendee ? res.json({ attendee }) : res.status(404).json({ error: 'Attendee not found' });
+  } catch (error) { return next(error); }
+});
+
+router.patch('/:campaignId/attendees/:attendeeId', async (req, res, next) => {
+  try {
+    const campaign = await getCampaign(req.params.campaignId); const attendee = campaign && await prisma.attendee.findFirst({ where: { id: req.params.attendeeId, eventId: campaign.eventId } });
+    if (!attendee) return res.status(404).json({ error: 'Attendee not found' });
+    const { name, phone, optedIn, status, waitlistRank } = req.body;
+    if (status && !attendeeStatuses.has(status)) return res.status(400).json({ error: 'Invalid attendee status' });
+    const updated = await prisma.attendee.update({ where: { id: attendee.id }, data: { ...(name ? { name } : {}), ...(phone !== undefined ? { phone } : {}), ...(typeof optedIn === 'boolean' ? { optedIn } : {}), ...(status ? { status } : {}), ...(Number.isInteger(waitlistRank) ? { waitlistRank } : {}) } });
+    return res.json({ attendee: updated });
+  } catch (error) { return next(error); }
+});
+
+router.post('/:campaignId/responses', async (req, res, next) => {
+  try { const payload = { ...req.body, campaign_id: req.params.campaignId }; const validationError = validateCallResult(payload); if (validationError) return res.status(400).json({ error: validationError }); const response = await saveCallResult(payload); return response ? res.status(201).json({ message: 'Response saved', response }) : res.status(404).json({ error: 'Campaign or attendee not found' }); } catch (error) { return next(error); }
+});
+
+router.get('/:campaignId/preferences-summary', async (req, res, next) => {
+  try {
+    const campaign = await getCampaign(req.params.campaignId); if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+    const responses = await prisma.response.findMany({ where: { campaignId: campaign.id } }); const count = (field) => responses.reduce((acc, item) => { const key = item[field] || 'not_provided'; acc[key] = (acc[key] || 0) + 1; return acc; }, {});
+    return res.json({ totalResponses: responses.length, attendance: count('outcome'), transportModes: count('transportMode'), arrivalSlots: count('arrivalSlot'), foodPreferences: count('foodPreference'), escalations: responses.filter((item) => item.escalationFlag).length, accessibilityRequests: responses.filter((item) => item.accessibilityNeeds).length });
+  } catch (error) { return next(error); }
+});
+
+router.get('/:campaignId/tasks', async (req, res, next) => { try { res.json({ tasks: await prisma.followUp.findMany({ where: { campaignId: req.params.campaignId }, include: { attendee: true }, orderBy: { createdAt: 'desc' } }) }); } catch (error) { next(error); } });
+router.post('/:campaignId/tasks', async (req, res, next) => {
+  try { const campaign = await getCampaign(req.params.campaignId); if (!campaign) return res.status(404).json({ error: 'Campaign not found' }); if (!isString(req.body.summary)) return res.status(400).json({ error: 'summary is required' }); const task = await prisma.followUp.create({ data: { eventId: campaign.eventId, campaignId: campaign.id, attendeeId: req.body.attendeeId || null, summary: req.body.summary, owner: req.body.owner || null, type: req.body.type || 'follow_up', private: req.body.private === true, dueAt: req.body.dueAt ? new Date(req.body.dueAt) : null } }); return res.status(201).json({ task }); } catch (error) { return next(error); }
+});
+
+router.get('/:campaignId/waitlist', async (req, res, next) => {
+  try {
+    const campaign = await getCampaign(req.params.campaignId); if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+    const [waitlist, offers, releasedSeats] = await Promise.all([prisma.attendee.findMany({ where: { eventId: campaign.eventId, status: { in: ['WAITLISTED', 'OFFERED'] } }, orderBy: { waitlistRank: 'asc' } }), prisma.seatOffer.findMany({ where: { campaignId: campaign.id }, include: { attendee: true, seat: true }, orderBy: { createdAt: 'desc' } }), prisma.seat.findMany({ where: { eventId: campaign.eventId, status: 'RELEASED' } })]);
+    return res.json({ waitlist, offers, releasedSeats });
+  } catch (error) { return next(error); }
+});
+
+router.post('/:campaignId/waitlist/:attendeeId/offer', async (req, res, next) => {
+  try {
+    const campaign = await getCampaign(req.params.campaignId); const attendee = campaign && await prisma.attendee.findFirst({ where: { id: req.params.attendeeId, eventId: campaign.eventId, status: { in: ['WAITLISTED', 'OFFERED'] } } });
+    if (!campaign || !attendee) return res.status(404).json({ error: 'Eligible waitlisted attendee not found' });
+    const seat = await prisma.seat.findFirst({ where: { eventId: campaign.eventId, status: { in: ['RELEASED', 'AVAILABLE'] } }, orderBy: { seatNumber: 'asc' } }); if (!seat) return res.status(409).json({ error: 'No released or available seat exists' });
+    const offer = await prisma.$transaction(async (tx) => { const created = await tx.seatOffer.create({ data: { campaignId: campaign.id, attendeeId: attendee.id, seatId: seat.id, expiresAt: req.body.expiresAt ? new Date(req.body.expiresAt) : new Date(Date.now() + 30 * 60 * 1000) }, include: { attendee: true, seat: true } }); await tx.seat.update({ where: { id: seat.id }, data: { status: 'OFFERED' } }); await tx.attendee.update({ where: { id: attendee.id }, data: { status: 'OFFERED' } }); return created; });
+    return res.status(201).json({ offer });
+  } catch (error) { return next(error); }
+});
+
+router.post('/:campaignId/seats/:seatId/release', async (req, res, next) => { try { const campaign = await getCampaign(req.params.campaignId); const seat = campaign && await prisma.seat.findFirst({ where: { id: req.params.seatId, eventId: campaign.eventId } }); if (!seat) return res.status(404).json({ error: 'Seat not found' }); const released = await prisma.seat.update({ where: { id: seat.id }, data: { status: 'RELEASED', attendeeId: null, releasedAt: new Date() } }); return res.json({ seat: released }); } catch (error) { return next(error); } });
+
+router.get('/:campaignId/activity', async (req, res, next) => { try { res.json({ activity: await prisma.callEvent.findMany({ where: { campaignId: req.params.campaignId }, include: { attendee: true }, orderBy: { occurredAt: 'desc' } }) }); } catch (error) { next(error); } });
+router.post('/:campaignId/call-events', async (req, res, next) => { try { const campaign = await getCampaign(req.params.campaignId); const attendee = campaign && await prisma.attendee.findFirst({ where: { id: req.body.attendeeId, eventId: campaign.eventId } }); if (!campaign || !attendee || !isString(req.body.eventType)) return res.status(400).json({ error: 'Valid attendeeId and eventType are required' }); const activity = await prisma.callEvent.create({ data: { eventId: campaign.eventId, campaignId: campaign.id, attendeeId: attendee.id, eventType: req.body.eventType, transcript: req.body.transcript || null, details: req.body.details || undefined } }); return res.status(201).json({ activity }); } catch (error) { return next(error); } });
 
 module.exports = router;

@@ -1,0 +1,88 @@
+{
+  "info": {
+    "name": "Rally Voice Call Results",
+    "_postman_id": "d55b4c64-b1a4-4357-b4a0-78608adc3e8c",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:3000" },
+    { "key": "sarvamSecret", "value": "replace-with-your-SARVAM_WEBHOOK_SECRET" },
+    { "key": "campaignId", "value": "" },
+    { "key": "attendeeId", "value": "" },
+    { "key": "decliningAttendeeId", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "1. Create campaign and test attendee",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"event\": {\n    \"name\": \"Rally Test Hackathon\",\n    \"startsAt\": \"2026-08-30T09:00:00.000Z\",\n    \"venue\": \"Innovation Hub, Bengaluru\",\n    \"capacity\": 100\n  },\n  \"campaign\": {\n    \"name\": \"Postman test campaign\",\n    \"attendanceEnabled\": true,\n    \"parkingEnabled\": true,\n    \"foodEnabled\": true,\n    \"languages\": [\"en\"],\n    \"tone\": \"helpful\"\n  },\n  \"attendees\": [\n    {\n      \"name\": \"Ananya Rao\",\n      \"phone\": \"+919000000000\",\n      \"optedIn\": true\n    },\n    {\n      \"name\": \"Rahul Verma\",\n      \"phone\": \"+919000000001\",\n      \"optedIn\": true\n    }\n  ]\n}"
+        },
+        "url": "{{baseUrl}}/api/campaigns"
+      },
+      "event": [{
+        "listen": "test",
+        "script": {
+          "exec": [
+            "pm.test('Campaign created', () => pm.response.to.have.status(201));",
+            "const body = pm.response.json();",
+            "pm.collectionVariables.set('campaignId', body.campaign.id);",
+            "pm.collectionVariables.set('attendeeId', body.attendees[0].id);",
+            "pm.collectionVariables.set('decliningAttendeeId', body.attendees[1].id);"
+          ]
+        }
+      }]
+    },
+    {
+      "name": "2. Sarvam submits call result",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Authorization", "value": "Bearer {{sarvamSecret}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"campaign_id\": \"{{campaignId}}\",\n  \"attendee_id\": \"{{attendeeId}}\",\n  \"attendance_status\": \"confirmed\",\n  \"transport_mode\": \"metro\",\n  \"arrival_slot\": \"Morning session: 9:00 AM to 1:00 PM\",\n  \"parking_needed\": true,\n  \"food_preference\": \"vegetarian\",\n  \"dietary_requirements\": \"No peanuts\",\n  \"team_status\": \"Open to team matching\",\n  \"escalation_flag\": false,\n  \"call_summary\": \"Ananya confirmed attendance and plans to arrive by metro for the morning session.\"\n}"
+        },
+        "url": "{{baseUrl}}/api/voice/call-results"
+      },
+      "event": [{
+        "listen": "test",
+        "script": {
+          "exec": [
+            "pm.test('Call result saved', () => pm.response.to.have.status(201));",
+            "pm.test('Outcome is confirmed', () => pm.expect(pm.response.json().response.outcome).to.eql('CONFIRMED'));"
+          ]
+        }
+      }]
+    },
+    {
+      "name": "3. Sarvam submits declined call result",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Authorization", "value": "Bearer {{sarvamSecret}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"campaign_id\": \"{{campaignId}}\",\n  \"attendee_id\": \"{{decliningAttendeeId}}\",\n  \"attendance_status\": \"declined\",\n  \"decline_reason\": \"Work travel conflict\",\n  \"seat_release\": \"yes\",\n  \"substitute_attendee\": \"Priya Verma, colleague\",\n  \"accessibility_needs\": \"Please have an organizer call back about venue access.\",\n  \"escalation_flag\": true,\n  \"call_summary\": \"Rahul declined because of work travel and approved releasing his seat. Priya may attend in his place.\"\n}"
+        },
+        "url": "{{baseUrl}}/api/voice/call-results"
+      },
+      "event": [{
+        "listen": "test",
+        "script": {
+          "exec": [
+            "pm.test('Declined call result saved', () => pm.response.to.have.status(201));",
+            "pm.test('Seat release is saved', () => pm.expect(pm.response.json().response.seatRelease).to.eql('YES'));"
+          ]
+        }
+      }]
+    }
+  ]
+}

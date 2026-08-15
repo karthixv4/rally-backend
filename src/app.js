@@ -4,6 +4,7 @@ const helmet = require('helmet');
 const morgan = require('morgan');
 const campaignRoutes = require('./routes/campaigns');
 const voiceRoutes = require('./routes/voice');
+const taskRoutes = require('./routes/tasks');
 
 const app = express();
 
@@ -24,6 +25,7 @@ app.get('/health', (_req, res) => {
 
 app.use('/api/campaigns', campaignRoutes);
 app.use('/api/voice', voiceRoutes);
+app.use('/api/tasks', taskRoutes);
 
 app.use((_req, res) => {
   res.status(404).json({ error: 'Route not found' });

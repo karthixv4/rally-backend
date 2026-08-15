@@ -1,6 +1,7 @@
 const express = require('express');
 const prisma = require('../db/prisma');
 const requireSarvamSecret = require('../middleware/requireSarvamSecret');
+const { saveCallResult, validateCallResult } = require('../services/callResults');
 
 const router = express.Router();
 
@@ -16,6 +17,20 @@ router.get('/demo-call-details', requireSarvamSecret, (_req, res) => {
       'Afternoon session: 2:00 PM to 6:00 PM'
     ]
   });
+});
+
+router.post('/call-results', requireSarvamSecret, async (req, res, next) => {
+  try {
+    const validationError = validateCallResult(req.body);
+    if (validationError) return res.status(400).json({ error: validationError });
+    const response = await saveCallResult(req.body);
+    if (!response) {
+      return res.status(404).json({ error: 'Campaign or attendee not found' });
+    }
+    return res.status(201).json({ message: 'Call result saved', response });
+  } catch (error) {
+    return next(error);
+  }
 });
 
 router.post('/call-context', requireSarvamSecret, async (req, res, next) => {

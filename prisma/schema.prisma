@@ -22,6 +22,43 @@ enum FollowUpStatus {
   COMPLETED
 }
 
+enum CallOutcome {
+  CONFIRMED
+  DECLINED
+  UNCERTAIN
+  WRONG_NUMBER
+  VOICEMAIL
+  CALL_DISCONNECTED
+}
+
+enum SeatRelease {
+  YES
+  NO
+  NOT_ASKED
+}
+
+enum CampaignState {
+  DRAFT
+  ACTIVE
+  PAUSED
+  COMPLETED
+}
+
+enum SeatStatus {
+  AVAILABLE
+  ASSIGNED
+  RELEASED
+  OFFERED
+}
+
+enum SeatOfferStatus {
+  PENDING
+  ACCEPTED
+  DECLINED
+  EXPIRED
+  CANCELLED
+}
+
 model Event {
   id                  String     @id @default(cuid())
   name                String
@@ -36,6 +73,8 @@ model Event {
   campaigns           Campaign[]
   attendees           Attendee[]
   followUps           FollowUp[]
+  seats               Seat[]
+  callEvents          CallEvent[]
 }
 
 model Campaign {
@@ -48,10 +87,15 @@ model Campaign {
   languages          String[]  @default(["en"])
   tone               String    @default("helpful")
   deadline           DateTime?
+  state              CampaignState @default(DRAFT)
+  sessionSlotOptions String[]  @default([])
   createdAt          DateTime  @default(now())
   updatedAt          DateTime  @updatedAt
   event              Event     @relation(fields: [eventId], references: [id], onDelete: Cascade)
   responses          Response[]
+  followUps          FollowUp[]
+  callEvents         CallEvent[]
+  seatOffers         SeatOffer[]
 }
 
 model Attendee {
@@ -67,21 +111,35 @@ model Attendee {
   event          Event          @relation(fields: [eventId], references: [id], onDelete: Cascade)
   responses      Response[]
   followUps      FollowUp[]
+  callEvents     CallEvent[]
+  seat           Seat?
+  seatOffers     SeatOffer[]
 
   @@index([eventId, status])
 }
 
 model Response {
-  id           String    @id @default(cuid())
-  campaignId   String
-  attendeeId   String
-  attendance   Boolean?
-  parking      Boolean?
-  foodPreference String?
-  transcript   String?
-  createdAt    DateTime  @default(now())
-  campaign     Campaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
-  attendee     Attendee  @relation(fields: [attendeeId], references: [id], onDelete: Cascade)
+  id                  String       @id @default(cuid())
+  campaignId          String
+  attendeeId          String
+  outcome             CallOutcome
+  attendance          Boolean?
+  transportMode       String?
+  arrivalSlot         String?
+  declineReason       String?
+  seatRelease         SeatRelease?
+  substituteAttendee  String?
+  escalationFlag      Boolean      @default(false)
+  callSummary         String?
+  parking             Boolean?
+  foodPreference      String?
+  transcript          String?
+  dietaryRequirements String?
+  accessibilityNeeds  String?
+  teamStatus          String?
+  createdAt           DateTime     @default(now())
+  campaign            Campaign     @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  attendee            Attendee     @relation(fields: [attendeeId], references: [id], onDelete: Cascade)
 
   @@index([campaignId, attendeeId])
 }
@@ -89,11 +147,65 @@ model Response {
 model FollowUp {
   id          String         @id @default(cuid())
   eventId     String
+  campaignId  String?
   attendeeId  String?
   summary     String
   private     Boolean        @default(false)
+  owner       String?
+  type        String         @default("follow_up")
+  dueAt       DateTime?
   status      FollowUpStatus @default(OPEN)
+  completedAt DateTime?
   createdAt   DateTime       @default(now())
   event       Event          @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  campaign    Campaign?      @relation(fields: [campaignId], references: [id], onDelete: SetNull)
   attendee    Attendee?      @relation(fields: [attendeeId], references: [id], onDelete: SetNull)
+}
+
+model CallEvent {
+  id          String       @id @default(cuid())
+  eventId     String
+  campaignId  String
+  attendeeId  String
+  eventType   String
+  outcome     CallOutcome?
+  transcript  String?
+  details     Json?
+  occurredAt  DateTime     @default(now())
+  event       Event        @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  campaign    Campaign     @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  attendee    Attendee     @relation(fields: [attendeeId], references: [id], onDelete: Cascade)
+
+  @@index([campaignId, occurredAt])
+}
+
+model Seat {
+  id          String     @id @default(cuid())
+  eventId     String
+  attendeeId  String?    @unique
+  seatNumber  Int
+  status      SeatStatus @default(AVAILABLE)
+  releasedAt  DateTime?
+  event       Event      @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  attendee    Attendee?  @relation(fields: [attendeeId], references: [id], onDelete: SetNull)
+  offers      SeatOffer[]
+
+  @@unique([eventId, seatNumber])
+  @@index([eventId, status])
+}
+
+model SeatOffer {
+  id          String          @id @default(cuid())
+  campaignId  String
+  seatId      String
+  attendeeId  String
+  status      SeatOfferStatus @default(PENDING)
+  expiresAt   DateTime
+  createdAt   DateTime        @default(now())
+  respondedAt DateTime?
+  campaign    Campaign        @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  seat        Seat            @relation(fields: [seatId], references: [id], onDelete: Cascade)
+  attendee    Attendee        @relation(fields: [attendeeId], references: [id], onDelete: Cascade)
+
+  @@index([campaignId, status])
 }
