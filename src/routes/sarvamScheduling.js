@@ -27,8 +27,9 @@ router.post('/:campaignId/sarvam/cohort', async (req, res, next) => {
     const campaign = await campaignForScheduling(req.params.campaignId);
     if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
     if (!campaign.sarvamCampaignId) return res.status(409).json({ error: 'Schedule the campaign with Sarvam before uploading a cohort' });
-    const attendees = await prisma.attendee.findMany({ where: { eventId: campaign.eventId, optedIn: true, phone: { not: null }, status: { not: 'WAITLISTED' } } });
-    if (!attendees.length) return res.status(400).json({ error: 'No opted-in attendees with phone numbers are available for upload' });
+    const useDemoRecipient = process.env.SARVAM_FORCE_DEMO_RECIPIENT === 'true';
+    const attendees = await prisma.attendee.findMany({ where: { eventId: campaign.eventId, optedIn: true, ...(useDemoRecipient ? {} : { phone: { not: null } }), status: { not: 'WAITLISTED' } } });
+    if (!attendees.length) return res.status(400).json({ error: 'No eligible opted-in attendees are available for upload' });
     const sarvamCohort = await uploadCohort(campaign.sarvamCampaignId, campaign.id, attendees, req.body.name || `${campaign.name} cohort`, req.body.cohortTransformation);
     return res.status(201).json({ uploadedAttendees: attendees.length, sarvamCohort });
   } catch (error) { return next(error); }

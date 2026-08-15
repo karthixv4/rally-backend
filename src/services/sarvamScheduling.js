@@ -34,7 +34,17 @@ function csvEscape(value) {
 
 function buildCohortCsv(campaignId, attendees) {
   const rows = [['attendee_id', 'attendee_name', 'phone_number', 'campaign_id']];
-  attendees.forEach((attendee) => rows.push([attendee.id, attendee.name, attendee.phone || '', campaignId]));
+  const useDemoRecipient = process.env.SARVAM_FORCE_DEMO_RECIPIENT === 'true';
+  const demoRecipient = process.env.SARVAM_DEMO_RECIPIENT_PHONE;
+  if (useDemoRecipient && !demoRecipient) {
+    throw new Error('SARVAM_DEMO_RECIPIENT_PHONE is required when SARVAM_FORCE_DEMO_RECIPIENT is true');
+  }
+  attendees.forEach((attendee) => rows.push([
+    attendee.id,
+    attendee.name,
+    useDemoRecipient ? demoRecipient : attendee.phone || '',
+    campaignId
+  ]));
   return rows.map((row) => row.map(csvEscape).join(',')).join('\n');
 }
 
