@@ -63,8 +63,8 @@ function csvEscape(value) {
   return `"${String(value ?? '').replace(/"/g, '""')}"`;
 }
 
-function buildCohortCsv(campaignId, attendees) {
-  const rows = [['attendee_id', 'attendee_name', 'phone_number', 'campaign_id']];
+function buildCohortCsv(attendees) {
+  const rows = [['attendee_id', 'attendee_name', 'phone_number']];
   const useDemoRecipient = process.env.SARVAM_FORCE_DEMO_RECIPIENT === 'true';
   const demoRecipient = process.env.SARVAM_DEMO_RECIPIENT_PHONE;
   if (useDemoRecipient && !demoRecipient) {
@@ -73,19 +73,15 @@ function buildCohortCsv(campaignId, attendees) {
   attendees.forEach((attendee) => rows.push([
     attendee.id,
     attendee.name,
-    useDemoRecipient ? demoRecipient : attendee.phone || '',
-    campaignId
+    useDemoRecipient ? demoRecipient : attendee.phone || ''
   ]));
   return rows.map((row) => row.map(csvEscape).join(',')).join('\n');
 }
 
 const defaultCohortTransformation = {
   phone_number: { column_name: 'phone_number' },
-  user_identifier: { column_name: 'attendee_id', required: true },
-  app_variables: {
-    campaign_id: { column_name: 'campaign_id' },
-    attendee_id: { column_name: 'attendee_id' }
-  }
+  // This associates Sarvam's cohort row with Rally without exposing it as an agent variable.
+  user_identifier: { column_name: 'attendee_id', required: true }
 };
 
 async function createScheduledCampaign(campaign, options) {
@@ -113,10 +109,10 @@ async function createScheduledCampaign(campaign, options) {
   return sarvamFetch(campaignUrl(), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
 }
 
-async function uploadCohort(sarvamCampaignId, campaignId, attendees, name, cohortTransformation = defaultCohortTransformation) {
+async function uploadCohort(sarvamCampaignId, attendees, name, cohortTransformation = defaultCohortTransformation) {
   const form = new FormData();
   form.append('name', name);
-  form.append('cohort_file', new Blob([buildCohortCsv(campaignId, attendees)], { type: 'text/csv' }), 'rally-attendees.csv');
+  form.append('cohort_file', new Blob([buildCohortCsv(attendees)], { type: 'text/csv' }), 'rally-attendees.csv');
   form.append('cohort_transformation_file', new Blob([JSON.stringify(cohortTransformation)], { type: 'application/json' }), 'transform.json');
   return sarvamFetch(`${campaignUrl(sarvamCampaignId)}/cohorts/upload`, { method: 'POST', body: form });
 }
@@ -176,7 +172,8 @@ async function triggerImmediateCall(campaign, attendee) {
         arrival_slot: '', attendance_status: '', attendee_name: attendee.name, call_summary: '', decline_reason: '', escalation_flag: '',
         event_date: formatEventDate(campaign.event.startsAt), event_name: campaign.event.name, event_venue: campaign.event.venue || 'the venue to be confirmed',
         gender: '', seat_release: '', session_slot_options: sessionSlots, substitute_attendee: '', transport_mode: '',
-        campaign_id: campaign.id, attendee_id: attendee.id
+        // The demo agent fetches hardcoded campaign and attendee details from Rally at call start.
+        // Do not add campaign_id or attendee_id here: they are not configured app variables in Sarvam.
       },
       ...(initialBotMessage || initialStateName ? { app_overrides: { ...(initialBotMessage ? { initial_bot_message: initialBotMessage } : {}), ...(initialStateName ? { initial_state_name: initialStateName } : {}) } } : {})
     },

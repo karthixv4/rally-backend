@@ -90,6 +90,7 @@ model Campaign {
   state              CampaignState @default(DRAFT)
   sessionSlotOptions String[]  @default([])
   sarvamCampaignId  String?   @unique
+  sarvamCohortUploadedAt DateTime?
   createdAt          DateTime  @default(now())
   updatedAt          DateTime  @updatedAt
   event              Event     @relation(fields: [eventId], references: [id], onDelete: Cascade)

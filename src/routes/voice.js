@@ -5,33 +5,71 @@ const { saveCallResult, validateCallResult } = require('../services/callResults'
 
 const router = express.Router();
 
+function webhookTraceId() {
+  return `voice-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
+function resultPayloadDebug(payload) {
+  const body = payload && typeof payload === 'object' ? payload : {};
+  return {
+    fields: Object.keys(body).sort(),
+    nestedObjects: Object.entries(body)
+      .filter(([, value]) => value && typeof value === 'object' && !Array.isArray(value))
+      .map(([key, value]) => ({ key, fields: Object.keys(value).slice(0, 20).sort() })),
+    campaignId: body.campaign_id ?? null,
+    attendeeId: body.attendee_id ?? null,
+    attendanceStatus: body.attendance_status ?? null,
+    seatRelease: body.seat_release ?? null,
+    escalationFlagType: body.escalation_flag === undefined ? 'missing' : typeof body.escalation_flag
+  };
+}
+
 // Temporary demo endpoint: remove after the campaign-backed call-context flow is in use.
-router.get('/demo-call-details', requireSarvamSecret, (_req, res) => {
-  return res.json({
-    // Temporary IDs for the hardcoded demo campaign; replace with dialer variables later.
-    campaign_id: 'cmstykcym0002lb7cn995z117',
-    attendee_id: 'cmstykd250003lb7coo2nbsqw',
-    event_name: 'Rally Community Build Hackathon',
-    event_date: 'Saturday, 30 August 2026',
-    event_venue: 'The Innovation Hub, Bengaluru',
-    attendee_name: 'Ananya Rao',
-    session_slot_options: [
-      'Morning session: 9:00 AM to 1:00 PM',
-      'Afternoon session: 2:00 PM to 6:00 PM'
-    ]
-  });
+router.get('/demo-call-details', requireSarvamSecret, async (_req, res, next) => {
+  try {
+    // Admin-only test context. The agent fetches these values itself at call start;
+    // they are not Sarvam app variables and are not part of the production bulk flow.
+    const campaignId = process.env.SARVAM_ADMIN_TEST_CAMPAIGN_ID || 'cmstykcym0002lb7cn995z117';
+    const attendeeId = process.env.SARVAM_ADMIN_TEST_ATTENDEE_ID || 'cmstykd250003lb7coo2nbsqw';
+    const campaign = await prisma.campaign.findUnique({ where: { id: campaignId }, include: { event: true } });
+    const attendee = await prisma.attendee.findFirst({ where: { id: attendeeId, eventId: campaign?.eventId } });
+    if (!campaign || !attendee) return res.status(500).json({ error: 'Configure a valid SARVAM_ADMIN_TEST_CAMPAIGN_ID and SARVAM_ADMIN_TEST_ATTENDEE_ID' });
+    return res.json({
+      campaign_id: campaign.id,
+      attendee_id: attendee.id,
+      event_name: campaign.event.name,
+      event_date: campaign.event.startsAt ? new Intl.DateTimeFormat('en-IN', { dateStyle: 'full', timeZone: 'Asia/Kolkata' }).format(campaign.event.startsAt) : 'the event date to be confirmed',
+      event_venue: campaign.event.venue || 'the venue to be confirmed',
+      attendee_name: attendee.name,
+      session_slot_options: campaign.sessionSlotOptions
+    });
+  } catch (error) { return next(error); }
 });
 
 router.post('/call-results', requireSarvamSecret, async (req, res, next) => {
+  const traceId = webhookTraceId();
+  res.set('X-Rally-Webhook-Trace', traceId);
   try {
     const validationError = validateCallResult(req.body);
-    if (validationError) return res.status(400).json({ error: validationError });
+    if (validationError) {
+      console.warn('[Rally voice result rejected]', JSON.stringify({ traceId, reason: validationError, received: resultPayloadDebug(req.body) }));
+      return res.status(400).json({
+        error: validationError,
+        code: 'INVALID_CALL_RESULT',
+        traceId,
+        required: ['campaign_id', 'attendee_id', 'attendance_status'],
+        note: 'attendance_status must be confirmed, declined, uncertain, wrong_number, voicemail, or call_disconnected'
+      });
+    }
     const response = await saveCallResult(req.body);
     if (!response) {
-      return res.status(404).json({ error: 'Campaign or attendee not found' });
+      console.warn('[Rally voice result not matched]', JSON.stringify({ traceId, received: resultPayloadDebug(req.body) }));
+      return res.status(404).json({ error: 'Campaign or attendee not found', code: 'CALL_RESULT_NOT_MATCHED', traceId });
     }
+    console.info('[Rally voice result saved]', JSON.stringify({ traceId, campaignId: req.body.campaign_id, attendeeId: req.body.attendee_id, attendanceStatus: req.body.attendance_status }));
     return res.status(201).json({ message: 'Call result saved', response });
   } catch (error) {
+    console.error('[Rally voice result failed]', JSON.stringify({ traceId, message: error.message, received: resultPayloadDebug(req.body) }));
     return next(error);
   }
 });

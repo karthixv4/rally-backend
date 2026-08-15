@@ -8,6 +8,44 @@ async function campaignForScheduling(campaignId) {
   return prisma.campaign.findUnique({ where: { id: campaignId }, include: { event: true } });
 }
 
+router.get('/:campaignId/sarvam/execution-status', async (req, res, next) => {
+  try {
+    const campaign = await campaignForScheduling(req.params.campaignId);
+    if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+    const [attendees, callEvents] = await Promise.all([
+      prisma.attendee.findMany({ where: { eventId: campaign.eventId }, select: { id: true, phone: true, optedIn: true, status: true } }),
+      prisma.callEvent.findMany({ where: { campaignId: campaign.id }, orderBy: { occurredAt: 'desc' }, take: 10, include: { attendee: { select: { name: true } } } })
+    ]);
+    const demoRecipientEnabled = process.env.SARVAM_FORCE_DEMO_RECIPIENT === 'true';
+    const eligible = attendees.filter((attendee) => attendee.optedIn && !['WAITLISTED', 'RELEASED'].includes(attendee.status) && (demoRecipientEnabled || Boolean(attendee.phone)));
+    const count = (predicate) => attendees.filter(predicate).length;
+    const callsRequested = callEvents.filter((event) => event.eventType === 'call_triggered').length;
+    const callResultsReceived = callEvents.filter((event) => event.eventType === 'call_completed').length;
+    const hasSarvamSchedule = Boolean(campaign.sarvamCampaignId);
+    const schedulerState = hasSarvamSchedule
+      ? campaign.state === 'PAUSED' ? 'paused' : 'scheduled'
+      : campaign.state === 'PAUSED' ? 'paused_before_launch' : 'not_started';
+    return res.json({
+      execution: {
+        schedulerState,
+        hasSarvamSchedule,
+        sarvamCampaignId: campaign.sarvamCampaignId,
+        demoRecipientEnabled,
+        attendees: {
+          total: attendees.length,
+          eligible: eligible.length,
+          notOptedIn: count((attendee) => !attendee.optedIn),
+          waitlistedOrReleased: count((attendee) => ['WAITLISTED', 'RELEASED'].includes(attendee.status)),
+          missingPhone: demoRecipientEnabled ? 0 : count((attendee) => attendee.optedIn && !attendee.phone)
+        },
+        callsRequested,
+        callResultsReceived,
+        latestActivity: callEvents[0] ? { eventType: callEvents[0].eventType, occurredAt: callEvents[0].occurredAt, attendeeName: callEvents[0].attendee?.name || null } : null
+      }
+    });
+  } catch (error) { return next(error); }
+});
+
 router.post('/:campaignId/sarvam/schedule', async (req, res, next) => {
   try {
     const campaign = await campaignForScheduling(req.params.campaignId);
@@ -30,7 +68,7 @@ router.post('/:campaignId/sarvam/cohort', async (req, res, next) => {
     const useDemoRecipient = process.env.SARVAM_FORCE_DEMO_RECIPIENT === 'true';
     const attendees = await prisma.attendee.findMany({ where: { eventId: campaign.eventId, optedIn: true, ...(useDemoRecipient ? {} : { phone: { not: null } }), status: { not: 'WAITLISTED' } } });
     if (!attendees.length) return res.status(400).json({ error: 'No eligible opted-in attendees are available for upload' });
-    const sarvamCohort = await uploadCohort(campaign.sarvamCampaignId, campaign.id, attendees, req.body.name || `${campaign.name} cohort`, req.body.cohortTransformation);
+    const sarvamCohort = await uploadCohort(campaign.sarvamCampaignId, attendees, req.body.name || `${campaign.name} cohort`, req.body.cohortTransformation);
     return res.status(201).json({ uploadedAttendees: attendees.length, sarvamCohort });
   } catch (error) { return next(error); }
 });
@@ -57,7 +95,7 @@ router.post('/:campaignId/sarvam/launch', async (req, res, next) => {
       where: { eventId: campaign.eventId, optedIn: true, ...(useDemoRecipient ? {} : { phone: { not: null } }), status: { not: 'WAITLISTED' } }
     });
     if (!attendees.length) return res.status(400).json({ error: 'No eligible opted-in attendees are available for launch' });
-    const sarvamCohort = await uploadCohort(sarvamCampaignId, campaign.id, attendees, req.body.cohortName || `${campaign.name} cohort`);
+    const sarvamCohort = await uploadCohort(sarvamCampaignId, attendees, req.body.cohortName || `${campaign.name} cohort`);
     const launchedCampaign = await prisma.campaign.update({ where: { id: campaign.id }, data: { state: 'ACTIVE' } });
     return res.status(201).json({ campaign: launchedCampaign, sarvamCampaignId, sarvamCampaign, sarvamCohort, uploadedAttendees: attendees.length });
   } catch (error) { return next(error); }
@@ -65,6 +103,7 @@ router.post('/:campaignId/sarvam/launch', async (req, res, next) => {
 
 router.post('/:campaignId/sarvam/call-now', async (req, res, next) => {
   try {
+    if (process.env.SARVAM_ENABLE_ADMIN_CALL_NOW !== 'true') return res.status(404).json({ error: 'Admin test calls are disabled' });
     const campaign = await campaignForScheduling(req.params.campaignId);
     if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
     const attendee = await prisma.attendee.findFirst({
@@ -98,13 +137,16 @@ router.put('/:campaignId/sarvam/status', async (req, res, next) => {
     if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
     const isScheduled = Boolean(campaign.sarvamCampaignId);
     const sarvamStatus = isScheduled ? await updateCampaignStatus(campaign.sarvamCampaignId, req.body.action) : null;
-    const updatedCampaign = await prisma.campaign.update({ where: { id: campaign.id }, data: { state: req.body.action === 'pause' ? 'PAUSED' : 'ACTIVE' }, include: { event: true } });
+    const nextState = req.body.action === 'pause' ? 'PAUSED' : isScheduled ? 'ACTIVE' : 'DRAFT';
+    const updatedCampaign = await prisma.campaign.update({ where: { id: campaign.id }, data: { state: nextState }, include: { event: true } });
     return res.json({
       sarvamStatus,
       campaign: updatedCampaign,
       message: isScheduled
         ? `Campaign ${req.body.action === 'pause' ? 'paused' : 'resumed'} in Sarvam`
-        : `Campaign ${req.body.action === 'pause' ? 'paused' : 'resumed'} locally; no Sarvam schedule exists yet`
+        : req.body.action === 'pause'
+          ? 'Campaign paused locally; no Sarvam schedule exists yet'
+          : 'Campaign is ready to launch; no Sarvam schedule exists yet'
     });
   } catch (error) { return next(error); }
 });
