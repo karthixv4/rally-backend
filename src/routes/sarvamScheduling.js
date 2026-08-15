@@ -84,7 +84,7 @@ router.post('/:campaignId/sarvam/call-now', async (req, res, next) => {
         campaignId: campaign.id,
         attendeeId: attendee.id,
         eventType: 'call_triggered',
-        details: { mode: 'immediate_outbound', sarvamOutboundId: sarvamOutbound.id || sarvamOutbound.outbound_id || null }
+        details: { mode: 'immediate_outbound', sarvamOutboundId: sarvamOutbound.attempt_id || sarvamOutbound.id || sarvamOutbound.outbound_id || null }
       }
     });
     return res.status(201).json({ message: 'Immediate call requested', attendee: { id: attendee.id, name: attendee.name }, sarvamOutbound, activity });
