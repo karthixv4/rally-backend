@@ -13,6 +13,29 @@ function campaignUrl(sarvamCampaignId = '') {
   return `${baseUrl}/orgs/${orgId}/workspaces/${workspaceId}/campaigns${sarvamCampaignId ? `/${sarvamCampaignId}` : ''}`;
 }
 
+function validateScheduleWindow(startTimestamp, endTimestamp) {
+  const start = new Date(startTimestamp);
+  const end = new Date(endTimestamp);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+    const error = new Error('Sarvam schedule timestamps must be valid ISO 8601 dates');
+    error.status = 400;
+    throw error;
+  }
+  if (end <= start) {
+    const error = new Error('Sarvam schedule endTimestamp must be after startTimestamp');
+    error.status = 400;
+    throw error;
+  }
+  const leadMinutes = Number(process.env.SARVAM_MIN_LEAD_TIME_MINUTES || 10);
+  const earliestStart = Date.now() + leadMinutes * 60 * 1000;
+  if (start.getTime() < earliestStart) {
+    const error = new Error(`Sarvam schedules need at least ${leadMinutes} minutes of lead time. Choose a start time after ${new Date(earliestStart).toISOString()}`);
+    error.status = 400;
+    throw error;
+  }
+  return { startTimestamp: start.toISOString(), endTimestamp: end.toISOString() };
+}
+
 async function sarvamFetch(url, options = {}) {
   const { apiKey } = config();
   const response = await fetch(url, { ...options, headers: { 'X-API-Key': apiKey, ...options.headers } });
@@ -60,6 +83,7 @@ const defaultCohortTransformation = {
 async function createScheduledCampaign(campaign, options) {
   const connectionId = options.connectionId || process.env.SARVAM_CONNECTION_ID;
   const callerNumber = options.callerNumber || process.env.SARVAM_CALLER_NUMBER;
+  const { startTimestamp, endTimestamp } = validateScheduleWindow(options.startTimestamp, options.endTimestamp);
   const payload = {
     name: options.name || campaign.name,
     app_config: {
@@ -74,8 +98,8 @@ async function createScheduledCampaign(campaign, options) {
         retry_on: { busy: { enabled: true }, no_answer: { enabled: true }, short_duration: { enabled: true, threshold_seconds: 25 } }
       }
     },
-    start_timestamp: options.startTimestamp,
-    end_timestamp: options.endTimestamp,
+    start_timestamp: startTimestamp,
+    end_timestamp: endTimestamp,
     allowed_schedule: options.allowedSchedule || { timezone: 'Asia/Kolkata', allowed_start_time: '09:00', allowed_end_time: '18:00', allowed_days: ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'] }
   };
   return sarvamFetch(campaignUrl(), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });

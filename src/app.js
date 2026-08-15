@@ -53,7 +53,12 @@ app.use((_req, res) => {
 
 app.use((err, _req, res, _next) => {
   console.error(err);
-  res.status(500).json({ error: 'Internal server error' });
+  const status = Number.isInteger(err.status) && err.status >= 400 && err.status < 500 ? err.status : 500;
+  const details = err.details?.error?.data;
+  res.status(status).json({
+    error: status === 500 ? 'Internal server error' : err.message,
+    ...(details ? { details } : {})
+  });
 });
 
 module.exports = app;
