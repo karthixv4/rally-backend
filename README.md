@@ -101,12 +101,15 @@ The backend keeps the Sarvam scheduling key server-side and exposes these Rally 
 POST /api/campaigns/:campaignId/sarvam/schedule
 POST /api/campaigns/:campaignId/sarvam/cohort
 POST /api/campaigns/:campaignId/sarvam/launch
+POST /api/campaigns/:campaignId/sarvam/call-now
 PUT  /api/campaigns/:campaignId/sarvam/status
 ```
 
 The schedule request needs `startTimestamp` and `endTimestamp` (ISO 8601); optional fields let the frontend override the Sarvam app, connection, caller number, retry configuration, and allowed schedule. The cohort request generates the CSV and Sarvam transformation mapping automatically. It supplies each row's phone number, `campaign_id`, and `attendee_id` to the agent. Status accepts `{ "action": "pause" }` or `{ "action": "resume" }`.
 
 For the frontend's single **Launch campaign** action, call `POST /api/campaigns/:campaignId/sarvam/launch` with `startTimestamp` and `endTimestamp`. It creates the Sarvam scheduled campaign if needed, uploads eligible attendees, and sets Rally campaign state to `ACTIVE` only after both steps succeed.
+
+`POST /api/campaigns/:campaignId/sarvam/call-now` creates one immediate Sarvam outbound call. Its optional JSON body accepts `{ "attendeeId": "..." }`; otherwise Rally uses the first eligible opted-in attendee. It honours the demo-recipient override and passes event/attendee variables plus `campaign_id` and `attendee_id` to the agent. Set `SARVAM_OUTBOUND_WEBHOOK_URL` to the public `POST /api/voice/call-results` URL. Rally appends its server-side webhook token automatically, so Sarvam can safely post the result back without exposing credentials to the frontend.
 
 For the current demo, set `SARVAM_FORCE_DEMO_RECIPIENT=true` and `SARVAM_DEMO_RECIPIENT_PHONE=+918123011069`. Every uploaded cohort row will call that number rather than attendee phone numbers. Set the flag to `false` or remove both variables to restore normal attendee calling.
 
