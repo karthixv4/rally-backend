@@ -20,9 +20,6 @@ function validateCallResult(payload) {
   if (payload.escalation_flag !== undefined && typeof payload.escalation_flag !== 'boolean') {
     return 'escalation_flag must be a boolean';
   }
-  if (attendanceStatus === 'declined' && !payload.seat_release) {
-    return 'seat_release is required when attendance_status is declined';
-  }
   return null;
 }
 
@@ -34,9 +31,13 @@ async function saveCallResult(payload) {
   if (!campaign || !attendee) return null;
 
   const outcome = payload.attendance_status;
+  // A decline is still a valid completed call when the agent did not reach the
+  // optional seat-release question. Preserve a supplied answer, otherwise make
+  // the missing answer explicit rather than rejecting the entire call result.
+  const seatRelease = outcome === 'declined' ? (payload.seat_release || 'not_asked') : payload.seat_release;
   const statusByOutcome = {
     confirmed: 'CONFIRMED',
-    declined: payload.seat_release === 'yes' ? 'RELEASED' : 'DECLINED',
+    declined: seatRelease === 'yes' ? 'RELEASED' : 'DECLINED',
     uncertain: 'UNCERTAIN'
   };
   const attendance = outcome === 'confirmed' ? true : outcome === 'declined' ? false : null;
@@ -51,7 +52,7 @@ async function saveCallResult(payload) {
         transportMode: payload.transport_mode || null,
         arrivalSlot: payload.arrival_slot || null,
         declineReason: payload.decline_reason || null,
-        seatRelease: payload.seat_release ? toPrismaEnum(payload.seat_release) : null,
+        seatRelease: seatRelease ? toPrismaEnum(seatRelease) : null,
         substituteAttendee: payload.substitute_attendee || null,
         escalationFlag: payload.escalation_flag === true,
         callSummary: payload.call_summary || null,

@@ -12,9 +12,18 @@ const campaignStates = new Set(['DRAFT', 'ACTIVE', 'PAUSED', 'COMPLETED']);
 const isString = (value) => typeof value === 'string' && value.trim();
 const campaignInclude = { event: { include: { seats: true } }, _count: { select: { responses: true, followUps: true, seatOffers: true } } };
 
-async function getCampaign(campaignId) {
-  return prisma.campaign.findUnique({ where: { id: campaignId }, include: campaignInclude });
+async function getCampaign(campaignId, userId) {
+  return prisma.campaign.findFirst({ where: { id: campaignId, event: { userId } }, include: campaignInclude });
 }
+
+router.param('campaignId', async (req, res, next, campaignId) => {
+  try {
+    const campaign = await getCampaign(campaignId, req.user.id);
+    if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+    req.authorizedCampaign = campaign;
+    return next();
+  } catch (error) { return next(error); }
+});
 
 function attendeeData(attendee, eventId) {
   return { eventId, name: attendee.name.trim(), phone: attendee.phone || null, optedIn: attendee.optedIn === true, status: attendeeStatuses.has(attendee.status) ? attendee.status : 'INVITED', waitlistRank: Number.isInteger(attendee.waitlistRank) ? attendee.waitlistRank : null };
@@ -36,20 +45,53 @@ function spreadsheetAttendee(row) {
   };
 }
 
-router.get('/', async (_req, res, next) => {
-  try { res.json({ campaigns: await prisma.campaign.findMany({ include: campaignInclude, orderBy: { createdAt: 'desc' } }) }); } catch (error) { next(error); }
+router.get('/', async (req, res, next) => {
+  try {
+    const [campaigns, attendeeCounts] = await Promise.all([
+      prisma.campaign.findMany({ where: { event: { userId: req.user.id } }, include: campaignInclude, orderBy: { createdAt: 'desc' } }),
+      prisma.attendee.groupBy({ by: ['eventId', 'status'], where: { event: { userId: req.user.id } }, _count: { _all: true } })
+    ]);
+    const attendeeCountsByEvent = new Map();
+    for (const row of attendeeCounts) {
+      const counts = attendeeCountsByEvent.get(row.eventId) || {};
+      counts[row.status] = row._count._all;
+      attendeeCountsByEvent.set(row.eventId, counts);
+    }
+    return res.json({
+      campaigns: campaigns.map((campaign) => {
+        const attendeeCountsForEvent = attendeeCountsByEvent.get(campaign.eventId) || {};
+        return {
+          ...campaign,
+          dashboardCounts: {
+            totalAttendees: Object.values(attendeeCountsForEvent).reduce((total, value) => total + value, 0),
+            confirmed: attendeeCountsForEvent.CONFIRMED || 0,
+            declined: (attendeeCountsForEvent.DECLINED || 0) + (attendeeCountsForEvent.RELEASED || 0),
+            uncertain: attendeeCountsForEvent.UNCERTAIN || 0,
+            awaitingResult: attendeeCountsForEvent.INVITED || 0
+          }
+        };
+      })
+    });
+  } catch (error) { return next(error); }
 });
 
 router.post('/', async (req, res, next) => {
   try {
-    const { event, campaign, attendees = [] } = req.body;
-    if (!event || !campaign || !isString(event.name) || !isString(campaign.name)) return res.status(400).json({ error: 'event.name and campaign.name are required' });
+    const { event, eventId, campaign, attendees = [] } = req.body;
+    if (!campaign || !isString(campaign.name) || (!eventId && (!event || !isString(event.name)))) return res.status(400).json({ error: 'campaign.name and either eventId or event.name are required' });
     if (!Array.isArray(attendees) || attendees.some((attendee) => !isString(attendee.name))) return res.status(400).json({ error: 'attendees must be an array and every attendee needs a name' });
     const result = await prisma.$transaction(async (tx) => {
-      const createdEvent = await tx.event.create({ data: { name: event.name.trim(), startsAt: event.startsAt ? new Date(event.startsAt) : null, venue: event.venue || null, schedule: event.schedule || null, parkingInstructions: event.parkingInstructions || null, helpContact: event.helpContact || null, capacity: Number.isInteger(event.capacity) ? event.capacity : null } });
+      const createdEvent = eventId
+        ? await tx.event.findFirst({ where: { id: eventId, userId: req.user.id } })
+        : await tx.event.create({ data: { name: event.name.trim(), startsAt: event.startsAt ? new Date(event.startsAt) : null, venue: event.venue || null, schedule: event.schedule || null, parkingInstructions: event.parkingInstructions || null, helpContact: event.helpContact || null, capacity: Number.isInteger(event.capacity) ? event.capacity : null, userId: req.user.id } });
+      if (!createdEvent) {
+        const error = new Error('Event not found');
+        error.status = 404;
+        throw error;
+      }
       const createdCampaign = await tx.campaign.create({ data: { eventId: createdEvent.id, name: campaign.name.trim(), attendanceEnabled: campaign.attendanceEnabled !== false, parkingEnabled: campaign.parkingEnabled === true, foodEnabled: campaign.foodEnabled === true, languages: Array.isArray(campaign.languages) && campaign.languages.length ? campaign.languages : ['en'], tone: campaign.tone || 'helpful', deadline: campaign.deadline ? new Date(campaign.deadline) : null, state: campaignStates.has(campaign.state) ? campaign.state : 'DRAFT', sessionSlotOptions: Array.isArray(campaign.sessionSlotOptions) ? campaign.sessionSlotOptions : [] } });
       const createdAttendees = attendees.length ? await tx.attendee.createManyAndReturn({ data: attendees.map((attendee) => attendeeData(attendee, createdEvent.id)) }) : [];
-      if (createdEvent.capacity) await tx.seat.createMany({ data: Array.from({ length: createdEvent.capacity }, (_, index) => ({ eventId: createdEvent.id, seatNumber: index + 1 })) });
+      if (!eventId && createdEvent.capacity) await tx.seat.createMany({ data: Array.from({ length: createdEvent.capacity }, (_, index) => ({ eventId: createdEvent.id, seatNumber: index + 1 })) });
       return { event: createdEvent, campaign: createdCampaign, attendees: createdAttendees };
     });
     return res.status(201).json({ message: 'Campaign created', ...result, attendeeCount: result.attendees.length });
@@ -57,12 +99,12 @@ router.post('/', async (req, res, next) => {
 });
 
 router.get('/:campaignId', async (req, res, next) => {
-  try { const campaign = await getCampaign(req.params.campaignId); return campaign ? res.json({ campaign }) : res.status(404).json({ error: 'Campaign not found' }); } catch (error) { return next(error); }
+  try { const campaign = await getCampaign(req.params.campaignId, req.user.id); return campaign ? res.json({ campaign }) : res.status(404).json({ error: 'Campaign not found' }); } catch (error) { return next(error); }
 });
 
 router.patch('/:campaignId', async (req, res, next) => {
   try {
-    const campaign = await getCampaign(req.params.campaignId);
+    const campaign = await getCampaign(req.params.campaignId, req.user.id);
     if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
     const { event = {}, ...campaignPatch } = req.body;
     if (campaignPatch.state && !campaignStates.has(campaignPatch.state)) return res.status(400).json({ error: 'Invalid campaign state' });

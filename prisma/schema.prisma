@@ -61,6 +61,7 @@ enum SeatOfferStatus {
 
 model Event {
   id                  String     @id @default(cuid())
+  userId              String?
   name                String
   startsAt            DateTime?
   venue               String?
@@ -75,6 +76,19 @@ model Event {
   followUps           FollowUp[]
   seats               Seat[]
   callEvents          CallEvent[]
+  user                User?      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+}
+
+model User {
+  id           String    @id @default(cuid())
+  name         String?
+  email        String    @unique
+  passwordHash String
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  events       Event[]
 }
 
 model Campaign {

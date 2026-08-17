@@ -37,7 +37,17 @@ function toBoolean(value) {
 }
 
 function normalizeResultPayload(payload) {
-  return { ...(payload || {}), escalation_flag: toBoolean(payload?.escalation_flag) };
+  const body = payload || {};
+  const normalizeChoice = (value) => typeof value === 'string' ? value.trim().toLowerCase() : value;
+  const seatRelease = normalizeChoice(body.seat_release);
+  return {
+    ...body,
+    attendance_status: normalizeChoice(body.attendance_status),
+    // Some Sarvam post-call tool invocations serialise an unset output variable
+    // as an empty string. Treat that as not supplied, not as an invalid answer.
+    seat_release: seatRelease || undefined,
+    escalation_flag: toBoolean(body.escalation_flag)
+  };
 }
 
 router.post('/call-results', requireSarvamSecret, async (req, res, next) => {

@@ -63,6 +63,17 @@ function csvEscape(value) {
   return `"${String(value ?? '').replace(/"/g, '""')}"`;
 }
 
+function sarvamCampaignName(value) {
+  // Sarvam accepts only ASCII word characters, spaces, and hyphens, up to 50 chars.
+  // Keep the organiser's original name in Rally; this is only its external scheduler label.
+  const normalized = String(value || 'Rally campaign')
+    .replace(/[^A-Za-z0-9_\- ]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 50);
+  return normalized || 'Rally campaign';
+}
+
 function buildCohortCsv(campaignId, attendees) {
   const rows = [['campaign_id', 'attendee_id', 'attendee_name', 'phone_number']];
   attendees.forEach((attendee) => rows.push([
@@ -89,7 +100,7 @@ async function createScheduledCampaign(campaign, options) {
   const callerNumber = options.callerNumber || process.env.SARVAM_CALLER_NUMBER;
   const { startTimestamp, endTimestamp } = validateScheduleWindow(options.startTimestamp, options.endTimestamp);
   const payload = {
-    name: options.name || campaign.name,
+    name: sarvamCampaignName(options.name || campaign.name),
     app_config: {
       app_id: options.appId || process.env.SARVAM_APP_ID,
       app_version: Number(options.appVersion || process.env.SARVAM_APP_VERSION || 1),
@@ -125,4 +136,4 @@ async function getCampaignStatus(sarvamCampaignId) {
   return sarvamFetch(campaignUrl(sarvamCampaignId));
 }
 
-module.exports = { createScheduledCampaign, updateCampaignStatus, getCampaignStatus, uploadCohort, defaultAllowedSchedule };
+module.exports = { createScheduledCampaign, updateCampaignStatus, getCampaignStatus, uploadCohort, defaultAllowedSchedule, sarvamCampaignName };

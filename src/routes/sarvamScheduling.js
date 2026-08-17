@@ -1,12 +1,22 @@
 const express = require('express');
 const prisma = require('../db/prisma');
 const { createScheduledCampaign, defaultAllowedSchedule, getCampaignStatus, updateCampaignStatus, uploadCohort } = require('../services/sarvamScheduling');
+const { getTranscript, listAttempts } = require('../services/sarvamAnalytics');
 
 const router = express.Router();
 
-async function campaignForScheduling(campaignId) {
-  return prisma.campaign.findUnique({ where: { id: campaignId }, include: { event: true } });
+async function campaignForScheduling(campaignId, userId) {
+  return prisma.campaign.findFirst({ where: { id: campaignId, event: { userId } }, include: { event: true } });
 }
+
+router.param('campaignId', async (req, res, next, campaignId) => {
+  try {
+    const campaign = await campaignForScheduling(campaignId, req.user.id);
+    if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+    req.authorizedCampaign = campaign;
+    return next();
+  } catch (error) { return next(error); }
+});
 
 async function callableAttendeeReport(eventId) {
   const attendees = await prisma.attendee.findMany({
@@ -77,6 +87,85 @@ function ensureStartIsCallable(startTimestamp, allowedSchedule) {
   }
 }
 
+function analyticsRange(campaign, query) {
+  const now = new Date();
+  const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+  const candidateStart = campaign.sarvamScheduleStartsAt || (campaign.createdAt > thirtyDaysAgo ? campaign.createdAt : thirtyDaysAgo);
+  // A campaign scheduled for the future cannot have attempts yet. Query a short
+  // completed window instead of sending Sarvam an invalid start-after-end range.
+  const fallbackStart = candidateStart >= now ? new Date(now.getTime() - 60 * 60 * 1000) : candidateStart;
+  return {
+    startDatetime: query.startDatetime || fallbackStart.toISOString(),
+    endDatetime: query.endDatetime || now.toISOString()
+  };
+}
+
+function isCampaignAttempt(attempt, campaign) {
+  const variables = attempt.agent_variables || {};
+  return variables.campaign_id === campaign.id || attempt.campaign_id === campaign.sarvamCampaignId;
+}
+
+function countBy(items, key) {
+  return items.reduce((counts, item) => {
+    const value = item[key] || 'unknown';
+    counts[value] = (counts[value] || 0) + 1;
+    return counts;
+  }, {});
+}
+
+function meaningfulFailureReason(value) {
+  const reason = String(value || '').trim();
+  return !reason || reason.toUpperCase() === 'NO_FAILURE_REASON' ? null : reason;
+}
+
+function safeAttempt(attempt, attendeeNames) {
+  const variables = attempt.agent_variables || {};
+  const attendeeId = variables.attendee_id || attempt.user_identifier || null;
+  return {
+    attemptId: attempt.attempt_id,
+    interactionId: attempt.interaction_id,
+    attendeeId,
+    attendeeName: attendeeNames.get(attendeeId) || 'Unknown attendee',
+    attemptedAt: attempt.attempted_at || attempt.start_datetime,
+    endedAt: attempt.end_datetime || null,
+    connectivityStatus: attempt.connectivity_status || 'unknown',
+    durationSeconds: Number(attempt.duration_in_seconds || 0),
+    failureReason: meaningfulFailureReason(attempt.failure_reason),
+    endedBy: attempt.ended_by || null,
+    nextActionStatus: attempt.next_action_status || null,
+    retryAttempt: Number(attempt.retry_attempt || 0),
+    serverRetryAttempt: Number(attempt.server_retry_attempt || 0),
+    // Sarvam reports the initial try as attempt 1. Rally exposes extra tries only.
+    retryCount: Math.max(0, Math.max(Number(attempt.retry_attempt || 0), Number(attempt.server_retry_attempt || 0)) - 1),
+    language: attempt.language_name || null,
+    messageCount: Number(attempt.num_messages || 0),
+    hasLogIssues: Boolean(attempt.has_log_issues),
+    hasRecording: Boolean(attempt.audio_url),
+    isDebugCall: Number(attempt.is_debug_call || 0) === 1
+  };
+}
+
+async function campaignAnalytics(campaign, query) {
+  const range = analyticsRange(campaign, query);
+  const allAttempts = await listAttempts(range);
+  const attempts = allAttempts.filter((attempt) => isCampaignAttempt(attempt, campaign));
+  const attendeeNames = new Map((await prisma.attendee.findMany({ where: { eventId: campaign.eventId }, select: { id: true, name: true } })).map((attendee) => [attendee.id, attendee.name]));
+  const safeAttempts = attempts.map((attempt) => safeAttempt(attempt, attendeeNames)).sort((a, b) => new Date(b.attemptedAt) - new Date(a.attemptedAt));
+  return {
+    range,
+    summary: {
+      totalAttempts: safeAttempts.length,
+      uniqueAttendees: new Set(safeAttempts.map((attempt) => attempt.attendeeId).filter(Boolean)).size,
+      totalDurationSeconds: safeAttempts.reduce((total, attempt) => total + attempt.durationSeconds, 0),
+      retriedAttempts: safeAttempts.filter((attempt) => attempt.retryCount > 0).length,
+      logIssueAttempts: safeAttempts.filter((attempt) => attempt.hasLogIssues).length,
+      connectivityStatuses: countBy(safeAttempts, 'connectivityStatus'),
+      failureReasons: countBy(safeAttempts.filter((attempt) => attempt.failureReason), 'failureReason')
+    },
+    attempts: safeAttempts
+  };
+}
+
 router.get('/:campaignId/sarvam/status', async (req, res, next) => {
   try {
     const campaign = await campaignForScheduling(req.params.campaignId);
@@ -84,6 +173,26 @@ router.get('/:campaignId/sarvam/status', async (req, res, next) => {
     if (!campaign.sarvamCampaignId) return res.json({ sarvamCampaign: null });
     const sarvamCampaign = await getCampaignStatus(campaign.sarvamCampaignId);
     return res.json({ sarvamCampaign: safeSarvamCampaign(sarvamCampaign) });
+  } catch (error) { return next(error); }
+});
+
+router.get('/:campaignId/sarvam/analytics', async (req, res, next) => {
+  try {
+    const campaign = await campaignForScheduling(req.params.campaignId);
+    if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+    if (!campaign.sarvamCampaignId) return res.json({ analytics: { range: null, summary: { totalAttempts: 0, uniqueAttendees: 0, totalDurationSeconds: 0, retriedAttempts: 0, logIssueAttempts: 0, connectivityStatuses: {}, failureReasons: {} }, attempts: [] } });
+    return res.json({ analytics: await campaignAnalytics(campaign, req.query) });
+  } catch (error) { return next(error); }
+});
+
+router.get('/:campaignId/sarvam/analytics/interactions/:interactionId/transcript', async (req, res, next) => {
+  try {
+    const campaign = await campaignForScheduling(req.params.campaignId);
+    if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+    const analytics = await campaignAnalytics(campaign, req.query);
+    if (!analytics.attempts.some((attempt) => attempt.interactionId === req.params.interactionId)) return res.status(404).json({ error: 'Interaction was not found for this campaign' });
+    const transcript = await getTranscript(req.params.interactionId);
+    return res.json({ interactionId: req.params.interactionId, transcript });
   } catch (error) { return next(error); }
 });
 

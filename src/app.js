@@ -3,9 +3,12 @@ const express = require('express');
 const helmet = require('helmet');
 const morgan = require('morgan');
 const campaignRoutes = require('./routes/campaigns');
+const eventRoutes = require('./routes/events');
+const authRoutes = require('./routes/auth');
 const voiceRoutes = require('./routes/voice');
 const taskRoutes = require('./routes/tasks');
 const sarvamSchedulingRoutes = require('./routes/sarvamScheduling');
+const { requireAuth } = require('./middleware/requireAuth');
 
 const app = express();
 const configuredOrigins = (process.env.CORS_ORIGINS || 'https://rally-frontend-nine.vercel.app')
@@ -50,10 +53,12 @@ app.get('/health', (_req, res) => {
   });
 });
 
-app.use('/api/campaigns', campaignRoutes);
+app.use('/api/auth', authRoutes);
+app.use('/api/events', requireAuth, eventRoutes);
+app.use('/api/campaigns', requireAuth, campaignRoutes);
 app.use('/api/voice', voiceRoutes);
-app.use('/api/tasks', taskRoutes);
-app.use('/api/campaigns', sarvamSchedulingRoutes);
+app.use('/api/tasks', requireAuth, taskRoutes);
+app.use('/api/campaigns', requireAuth, sarvamSchedulingRoutes);
 
 app.use((_req, res) => {
   res.status(404).json({ error: 'Route not found' });
