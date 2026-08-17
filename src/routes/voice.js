@@ -50,6 +50,25 @@ function normalizeResultPayload(payload) {
   };
 }
 
+function callCollectionContext(campaign) {
+  const sessionSlotOptions = Array.isArray(campaign.sessionSlotOptions) ? campaign.sessionSlotOptions : [];
+  const parkingEnabled = campaign.parkingEnabled === true;
+  const foodEnabled = campaign.foodEnabled === true;
+  return {
+    attendance_enabled: campaign.attendanceEnabled !== false,
+    arrival_slot_enabled: sessionSlotOptions.length > 0,
+    parking_enabled: parkingEnabled,
+    food_enabled: foodEnabled,
+    session_slot_options: sessionSlotOptions,
+    // Agent-variable tools frequently accept strings only, so return a text version too.
+    session_slot_options_text: sessionSlotOptions.join('; '),
+    parking_eligible_transport_modes: ['car', 'personal car', 'two wheeler', 'two-wheeler', 'bike', 'motorcycle', 'scooter'],
+    parking_question_rule: parkingEnabled
+      ? 'Ask about parking only after confirmed attendance and only when the attendee says they will drive a personal car or ride a two-wheeler, bike, motorcycle, or scooter. Do not ask for parking when they use metro, bus, train, auto, cab, taxi, ride share, walk, cycle, or any other public/shared transport.'
+      : 'Parking collection is disabled for this campaign. Do not ask about parking.'
+  };
+}
+
 router.post('/call-results', requireSarvamSecret, async (req, res, next) => {
   const traceId = webhookTraceId();
   res.set('X-Rally-Webhook-Trace', traceId);
@@ -88,6 +107,7 @@ router.get('/call-context', requireSarvamSecret, async (req, res, next) => {
     const attendee = await prisma.attendee.findFirst({ where: { id: attendeeId, eventId: campaign?.eventId } });
     if (!campaign || !attendee) return res.status(404).json({ error: 'Campaign or attendee not found' });
     if (!attendee.optedIn) return res.status(403).json({ error: 'Attendee has not opted in to voice outreach' });
+    const collection = callCollectionContext(campaign);
     return res.json({
       campaign_id: campaign.id,
       attendee_id: attendee.id,
@@ -95,7 +115,7 @@ router.get('/call-context', requireSarvamSecret, async (req, res, next) => {
       event_date: campaign.event.startsAt ? new Intl.DateTimeFormat('en-IN', { dateStyle: 'full', timeZone: 'Asia/Kolkata' }).format(campaign.event.startsAt) : 'the event date to be confirmed',
       event_venue: campaign.event.venue || 'the venue to be confirmed',
       attendee_name: attendee.name,
-      session_slot_options: campaign.sessionSlotOptions
+      ...collection
     });
   } catch (error) { return next(error); }
 });
@@ -122,10 +142,12 @@ router.post('/call-context', requireSarvamSecret, async (req, res, next) => {
       return res.status(403).json({ error: 'Attendee has not opted in to voice outreach' });
     }
 
+    const collection = callCollectionContext(campaign);
     const enabledQuestions = {
-      attendance: campaign.attendanceEnabled,
-      parking: campaign.parkingEnabled,
-      foodPreference: campaign.foodEnabled
+      attendance: collection.attendance_enabled,
+      arrivalSlot: collection.arrival_slot_enabled,
+      parking: collection.parking_enabled,
+      foodPreference: collection.food_enabled
     };
 
     return res.json({
@@ -137,7 +159,7 @@ router.post('/call-context', requireSarvamSecret, async (req, res, next) => {
           startsAt: campaign.event.startsAt,
           venue: campaign.event.venue,
           schedule: campaign.event.schedule,
-          parkingInstructions: campaign.parkingEnabled
+          parkingInstructions: collection.parking_enabled
             ? campaign.event.parkingInstructions
             : undefined,
           helpContact: campaign.event.helpContact
@@ -147,6 +169,7 @@ router.post('/call-context', requireSarvamSecret, async (req, res, next) => {
           status: attendee.status
         },
         enabledQuestions,
+        collection,
         languages: campaign.languages,
         tone: campaign.tone,
         systemInstructions: [
