@@ -114,11 +114,13 @@ model Campaign {
   followUps          FollowUp[]
   callEvents         CallEvent[]
   seatOffers         SeatOffer[]
+  attendees          Attendee[]
 }
 
 model Attendee {
   id             String         @id @default(cuid())
   eventId        String
+  campaignId     String?
   name           String
   phone          String?
   optedIn        Boolean        @default(false)
@@ -127,6 +129,7 @@ model Attendee {
   createdAt      DateTime       @default(now())
   updatedAt      DateTime       @updatedAt
   event          Event          @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  campaign       Campaign?      @relation(fields: [campaignId], references: [id], onDelete: Cascade)
   responses      Response[]
   followUps      FollowUp[]
   callEvents     CallEvent[]
@@ -134,6 +137,7 @@ model Attendee {
   seatOffers     SeatOffer[]
 
   @@index([eventId, status])
+  @@index([campaignId, status])
 }
 
 model Response {
@@ -219,6 +223,9 @@ model SeatOffer {
   attendeeId  String
   status      SeatOfferStatus @default(PENDING)
   expiresAt   DateTime
+  callRequestedAt DateTime?
+  sarvamOutboundId String?
+  callFailureReason String?
   createdAt   DateTime        @default(now())
   respondedAt DateTime?
   campaign    Campaign        @relation(fields: [campaignId], references: [id], onDelete: Cascade)
@@ -226,4 +233,5 @@ model SeatOffer {
   attendee    Attendee        @relation(fields: [attendeeId], references: [id], onDelete: Cascade)
 
   @@index([campaignId, status])
+  @@index([campaignId, status, expiresAt])
 }

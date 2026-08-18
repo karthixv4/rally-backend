@@ -30,7 +30,16 @@ router.post('/', async (req, res, next) => {
   try {
     const event = eventInput(req.body);
     if (!event.name) return res.status(400).json({ error: 'Event name is required' });
-    return res.status(201).json({ event: await prisma.event.create({ data: { ...event, userId: req.user.id } }) });
+    const created = await prisma.$transaction(async (tx) => {
+      const createdEvent = await tx.event.create({ data: { ...event, userId: req.user.id } });
+      if (createdEvent.capacity) {
+        await tx.seat.createMany({
+          data: Array.from({ length: createdEvent.capacity }, (_, index) => ({ eventId: createdEvent.id, seatNumber: index + 1 }))
+        });
+      }
+      return createdEvent;
+    });
+    return res.status(201).json({ event: created });
   } catch (error) { return next(error); }
 });
 

@@ -90,11 +90,42 @@ PATCH                             /api/tasks/:taskId
 GET                               /api/campaigns/:campaignId/waitlist
 POST                              /api/campaigns/:campaignId/waitlist/:attendeeId/offer
 POST                              /api/campaigns/:campaignId/seats/:seatId/release
+POST                              /api/campaigns/:campaignId/waitlist/recover
 GET                               /api/campaigns/:campaignId/activity
 POST                              /api/campaigns/:campaignId/call-events
 ```
 
 The response endpoints accept the Sarvam call fields in `snake_case`: `attendance_status`, `transport_mode`, `arrival_slot`, `decline_reason`, `seat_release`, `substitute_attendee`, `escalation_flag`, `call_summary`, `food_preference`, `parking_needed`, `dietary_requirements`, `accessibility_needs`, `team_status`, and `transcript`.
+
+## Waitlist recovery
+
+Rally treats event capacity as a shared, physical seat inventory. On import, the first non-waitlisted invitees reserve the available event seats; overflow invitees are safely moved to `WAITLISTED` in import order (or retain their supplied `waitlistRank`). The bulk Sarvam campaign includes only `INVITED` attendees, never waitlisted, offered, confirmed, or released people.
+
+When a primary attendee declines without naming a substitute, Rally releases their reservation, assigns that exact seat to the next opted-in, phone-consented waitlisted attendee, and creates a 30-minute offer. A confirmed recovery call accepts the offer and assigns the seat. A decline or expiry releases it and moves to the next person. Explicit `seat_release: no` and any named substitute prevent automatic release and create an organiser follow-up instead.
+
+Set `SARVAM_WAITLIST_RECOVERY_ENABLED=true` only after publishing the agent variables below. Rally then uses Sarvam's immediate outbound API for the recovery call; a failed outbound is stored as a visible task and can be retried from **Waitlist recovery** using `POST /api/campaigns/:campaignId/waitlist/recover`.
+
+Add these **input variables** to the Sarvam agent and publish a new version before enabling recovery:
+
+```text
+call_type
+seat_offer_id
+seat_number
+seat_offer_expires_at
+```
+
+The normal cohort provides `call_type=primary_rsvp`. A recovery outbound provides `call_type=waitlist_recovery` plus the offer details. In the agent, branch before the usual RSVP flow:
+
+```text
+If call_type is waitlist_recovery:
+  Say a place has opened for {{event_name}} and ask whether the attendee wants it.
+  Do not run the normal attendance/parking/arrival questionnaire unless they accept.
+  On acceptance set attendance_status=confirmed.
+  On decline set attendance_status=declined.
+  Include campaign_id, attendee_id, and seat_offer_id in the post-call result body.
+```
+
+`seat_offer_id` is kept in Rally's audit trail and lets the recovery result be matched to the reserved seat. It should be mapped through the Sarvam post-call HTTP tool just like `campaign_id` and `attendee_id`.
 
 ### Demo XLSX attendee import
 

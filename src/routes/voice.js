@@ -36,6 +36,15 @@ function toBoolean(value) {
   return false;
 }
 
+function toOptionalBoolean(value) {
+  if (typeof value === 'boolean') return value;
+  if (typeof value !== 'string') return value;
+  const normalized = value.trim().toLowerCase();
+  if (['true', 'yes', '1', 'required'].includes(normalized)) return true;
+  if (['false', 'no', '0', 'not_required', 'not required'].includes(normalized)) return false;
+  return undefined;
+}
+
 function normalizeResultPayload(payload) {
   const body = payload || {};
   const normalizeChoice = (value) => typeof value === 'string' ? value.trim().toLowerCase() : value;
@@ -46,26 +55,8 @@ function normalizeResultPayload(payload) {
     // Some Sarvam post-call tool invocations serialise an unset output variable
     // as an empty string. Treat that as not supplied, not as an invalid answer.
     seat_release: seatRelease || undefined,
-    escalation_flag: toBoolean(body.escalation_flag)
-  };
-}
-
-function callCollectionContext(campaign) {
-  const sessionSlotOptions = Array.isArray(campaign.sessionSlotOptions) ? campaign.sessionSlotOptions : [];
-  const parkingEnabled = campaign.parkingEnabled === true;
-  const foodEnabled = campaign.foodEnabled === true;
-  return {
-    attendance_enabled: campaign.attendanceEnabled !== false,
-    arrival_slot_enabled: sessionSlotOptions.length > 0,
-    parking_enabled: parkingEnabled,
-    food_enabled: foodEnabled,
-    session_slot_options: sessionSlotOptions,
-    // Agent-variable tools frequently accept strings only, so return a text version too.
-    session_slot_options_text: sessionSlotOptions.join('; '),
-    parking_eligible_transport_modes: ['car', 'personal car', 'two wheeler', 'two-wheeler', 'bike', 'motorcycle', 'scooter'],
-    parking_question_rule: parkingEnabled
-      ? 'Ask about parking only after confirmed attendance and only when the attendee says they will drive a personal car or ride a two-wheeler, bike, motorcycle, or scooter. Do not ask for parking when they use metro, bus, train, auto, cab, taxi, ride share, walk, cycle, or any other public/shared transport.'
-      : 'Parking collection is disabled for this campaign. Do not ask about parking.'
+    escalation_flag: toBoolean(body.escalation_flag),
+    parking_needed: toOptionalBoolean(body.parking_needed)
   };
 }
 
@@ -104,18 +95,14 @@ router.get('/call-context', requireSarvamSecret, async (req, res, next) => {
     const attendeeId = req.query.attendee_id;
     if (!campaignId || !attendeeId) return res.status(400).json({ error: 'campaign_id and attendee_id are required' });
     const campaign = await prisma.campaign.findUnique({ where: { id: campaignId }, include: { event: true } });
-    const attendee = await prisma.attendee.findFirst({ where: { id: attendeeId, eventId: campaign?.eventId } });
+    const attendee = await prisma.attendee.findFirst({ where: { id: attendeeId, campaignId: campaign?.id } });
     if (!campaign || !attendee) return res.status(404).json({ error: 'Campaign or attendee not found' });
     if (!attendee.optedIn) return res.status(403).json({ error: 'Attendee has not opted in to voice outreach' });
-    const collection = callCollectionContext(campaign);
     return res.json({
       campaign_id: campaign.id,
       attendee_id: attendee.id,
-      event_name: campaign.event.name,
-      event_date: campaign.event.startsAt ? new Intl.DateTimeFormat('en-IN', { dateStyle: 'full', timeZone: 'Asia/Kolkata' }).format(campaign.event.startsAt) : 'the event date to be confirmed',
-      event_venue: campaign.event.venue || 'the venue to be confirmed',
       attendee_name: attendee.name,
-      ...collection
+      attendee_status: attendee.status
     });
   } catch (error) { return next(error); }
 });
@@ -132,7 +119,7 @@ router.post('/call-context', requireSarvamSecret, async (req, res, next) => {
       include: { event: true }
     });
     const attendee = await prisma.attendee.findFirst({
-      where: { id: attendeeId, eventId: campaign?.eventId }
+      where: { id: attendeeId, campaignId: campaign?.id }
     });
 
     if (!campaign || !attendee) {
@@ -142,42 +129,17 @@ router.post('/call-context', requireSarvamSecret, async (req, res, next) => {
       return res.status(403).json({ error: 'Attendee has not opted in to voice outreach' });
     }
 
-    const collection = callCollectionContext(campaign);
-    const enabledQuestions = {
-      attendance: collection.attendance_enabled,
-      arrivalSlot: collection.arrival_slot_enabled,
-      parking: collection.parking_enabled,
-      foodPreference: collection.food_enabled
-    };
-
     return res.json({
       callContext: {
         campaignId: campaign.id,
         attendeeId: attendee.id,
-        event: {
-          name: campaign.event.name,
-          startsAt: campaign.event.startsAt,
-          venue: campaign.event.venue,
-          schedule: campaign.event.schedule,
-          parkingInstructions: collection.parking_enabled
-            ? campaign.event.parkingInstructions
-            : undefined,
-          helpContact: campaign.event.helpContact
-        },
         attendee: {
           firstName: attendee.name.split(/\s+/)[0],
           status: attendee.status
         },
-        enabledQuestions,
-        collection,
-        languages: campaign.languages,
-        tone: campaign.tone,
         systemInstructions: [
-          `You are Rally, the automated event assistant for ${campaign.event.name}.`,
-          'Disclose that you are automated and ask whether this is a good time for a short call.',
-          'Ask only the enabled questions.',
-          'Offer an immediate opt-out. Do not request payment, identity documents, or unrelated sensitive data.',
-          'For a decline, ask permission before releasing a seat.'
+          'This endpoint is for attendee-specific context only.',
+          'Campaign event details and collection rules are supplied as Sarvam cohort variables.'
         ]
       }
     });

@@ -18,19 +18,22 @@ router.param('campaignId', async (req, res, next, campaignId) => {
   } catch (error) { return next(error); }
 });
 
-async function callableAttendeeReport(eventId) {
+async function callableAttendeeReport(campaignId) {
   const attendees = await prisma.attendee.findMany({
-    where: { eventId },
+    where: { campaignId },
     select: { id: true, name: true, phone: true, optedIn: true, status: true }
   });
-  const callable = attendees.filter((attendee) => attendee.optedIn && attendee.phone && !['WAITLISTED', 'RELEASED'].includes(attendee.status));
+  // The bulk run is the primary invitation cohort only. Waitlisted people are
+  // contacted by the recovery outbound only after Rally has assigned them a
+  // released seat; confirmations and completed results must never be re-dialled.
+  const callable = attendees.filter((attendee) => attendee.optedIn && attendee.phone && attendee.status === 'INVITED');
   return {
     attendees: callable,
     readiness: {
       total: attendees.length,
       callable: callable.length,
       notOptedIn: attendees.filter((attendee) => !attendee.optedIn).length,
-      waitlistedOrReleased: attendees.filter((attendee) => ['WAITLISTED', 'RELEASED'].includes(attendee.status)).length,
+      waitlistedOrReleased: attendees.filter((attendee) => ['WAITLISTED', 'RELEASED', 'OFFERED'].includes(attendee.status)).length,
       missingPhone: attendees.filter((attendee) => attendee.optedIn && !attendee.phone).length
     }
   };
@@ -149,7 +152,7 @@ async function campaignAnalytics(campaign, query) {
   const range = analyticsRange(campaign, query);
   const allAttempts = await listAttempts(range);
   const attempts = allAttempts.filter((attempt) => isCampaignAttempt(attempt, campaign));
-  const attendeeNames = new Map((await prisma.attendee.findMany({ where: { eventId: campaign.eventId }, select: { id: true, name: true } })).map((attendee) => [attendee.id, attendee.name]));
+  const attendeeNames = new Map((await prisma.attendee.findMany({ where: { campaignId: campaign.id }, select: { id: true, name: true } })).map((attendee) => [attendee.id, attendee.name]));
   const safeAttempts = attempts.map((attempt) => safeAttempt(attempt, attendeeNames)).sort((a, b) => new Date(b.attemptedAt) - new Date(a.attemptedAt));
   return {
     range,
@@ -201,11 +204,11 @@ router.get('/:campaignId/sarvam/execution-status', async (req, res, next) => {
     const campaign = await campaignForScheduling(req.params.campaignId);
     if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
     const [attendees, callEvents, responses] = await Promise.all([
-      prisma.attendee.findMany({ where: { eventId: campaign.eventId }, select: { id: true, phone: true, optedIn: true, status: true } }),
+      prisma.attendee.findMany({ where: { campaignId: campaign.id }, select: { id: true, phone: true, optedIn: true, status: true } }),
       prisma.callEvent.findMany({ where: { campaignId: campaign.id }, orderBy: { occurredAt: 'desc' }, take: 10, include: { attendee: { select: { name: true } } } }),
       prisma.response.findMany({ where: { campaignId: campaign.id }, select: { attendeeId: true, outcome: true } })
     ]);
-    const eligible = attendees.filter((attendee) => attendee.optedIn && !['WAITLISTED', 'RELEASED'].includes(attendee.status) && Boolean(attendee.phone));
+    const eligible = attendees.filter((attendee) => attendee.optedIn && attendee.status === 'INVITED' && Boolean(attendee.phone));
     const count = (predicate) => attendees.filter(predicate).length;
     const respondedAttendeeIds = new Set(responses.map((response) => response.attendeeId));
     const outcomeCount = (outcome) => responses.filter((response) => response.outcome === outcome).length;
@@ -231,7 +234,7 @@ router.get('/:campaignId/sarvam/execution-status', async (req, res, next) => {
           total: attendees.length,
           eligible: eligible.length,
           notOptedIn: count((attendee) => !attendee.optedIn),
-          waitlistedOrReleased: count((attendee) => ['WAITLISTED', 'RELEASED'].includes(attendee.status)),
+          waitlistedOrReleased: count((attendee) => ['WAITLISTED', 'RELEASED', 'OFFERED'].includes(attendee.status)),
           missingPhone: count((attendee) => attendee.optedIn && !attendee.phone),
           awaitingCallOrResult: eligible.filter((attendee) => !respondedAttendeeIds.has(attendee.id)).length
         },
@@ -269,9 +272,9 @@ router.post('/:campaignId/sarvam/cohort', async (req, res, next) => {
     const campaign = await campaignForScheduling(req.params.campaignId);
     if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
     if (!campaign.sarvamCampaignId) return res.status(409).json({ error: 'Schedule the campaign with Sarvam before uploading a cohort' });
-    const { attendees, readiness } = await callableAttendeeReport(campaign.eventId);
+    const { attendees, readiness } = await callableAttendeeReport(campaign.id);
     if (!attendees.length) return noCallableAttendees(res, readiness);
-    const sarvamCohort = await uploadCohort(campaign.sarvamCampaignId, campaign.id, attendees, req.body.name || `${campaign.name} cohort`, req.body.cohortTransformation);
+    const sarvamCohort = await uploadCohort(campaign.sarvamCampaignId, campaign, attendees, req.body.name || `${campaign.name} cohort`, req.body.cohortTransformation);
     await prisma.campaign.update({ where: { id: campaign.id }, data: { sarvamCohortUploadedAt: new Date() } });
     return res.status(201).json({ uploadedAttendees: attendees.length, sarvamCohort });
   } catch (error) { return next(error); }
@@ -284,7 +287,7 @@ router.post('/:campaignId/sarvam/launch', async (req, res, next) => {
 
     // Validate the imported list before creating anything in Sarvam. This prevents an
     // empty or non-consented spreadsheet from leaving behind a schedule with no cohort.
-    const { attendees, readiness } = await callableAttendeeReport(campaign.eventId);
+    const { attendees, readiness } = await callableAttendeeReport(campaign.id);
     if (!attendees.length) return noCallableAttendees(res, readiness);
 
     let sarvamCampaignId = campaign.sarvamCampaignId;
@@ -305,7 +308,7 @@ router.post('/:campaignId/sarvam/launch', async (req, res, next) => {
       await prisma.campaign.update({ where: { id: campaign.id }, data: { sarvamCampaignId, sarvamScheduleStartsAt: new Date(req.body.startTimestamp), sarvamScheduleEndsAt: new Date(req.body.endTimestamp) } });
     }
 
-    const sarvamCohort = await uploadCohort(sarvamCampaignId, campaign.id, attendees, req.body.cohortName || `${campaign.name} cohort`);
+    const sarvamCohort = await uploadCohort(sarvamCampaignId, campaign, attendees, req.body.cohortName || `${campaign.name} cohort`);
     const launchedCampaign = await prisma.campaign.update({ where: { id: campaign.id }, data: { state: 'ACTIVE', sarvamCohortUploadedAt: new Date() } });
     return res.status(201).json({ campaign: launchedCampaign, sarvamCampaignId, sarvamCampaign, sarvamCohort, uploadedAttendees: attendees.length, attendeeReadiness: readiness });
   } catch (error) { return next(error); }
