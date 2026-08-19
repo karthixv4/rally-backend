@@ -1,11 +1,12 @@
 const express = require('express');
 const multer = require('multer');
 const { readXlsxRows } = require('../services/xlsxReader');
+const { attendeesFromCsv, importSummary, rowsToAttendees } = require('../services/attendeeImport');
 const prisma = require('../db/prisma');
 const { saveCallResult, validateCallResult } = require('../services/callResults');
-const { dispatchWaitlistRecovery } = require('../services/callResults');
+const { dispatchAutomaticWaitlistRecovery, dispatchWaitlistRecovery } = require('../services/callResults');
 const { getCampaignStatus, updateCampaignStatus } = require('../services/sarvamScheduling');
-const { reconcileCampaignWaitlist, reserveInitialCampaignSeats } = require('../services/waitlistRecovery');
+const { reserveInitialCampaignSeats } = require('../services/waitlistRecovery');
 
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
@@ -31,21 +32,53 @@ function attendeeData(attendee, eventId, campaignId) {
   return { eventId, campaignId, name: attendee.name.trim(), phone: attendee.phone || null, optedIn: attendee.optedIn === true, status: attendeeStatuses.has(attendee.status) ? attendee.status : 'INVITED', waitlistRank: Number.isInteger(attendee.waitlistRank) ? attendee.waitlistRank : null };
 }
 
-function spreadsheetBoolean(value) {
-  if (typeof value === 'boolean') return value;
-  return ['true', 'yes', 'y', '1'].includes(String(value || '').trim().toLowerCase());
+function hasHeader(row, values) {
+  return row.map((cell) => String(cell ?? '').trim().toLowerCase().replace(/[\s_-]+/g, '')).some((cell) => values.includes(cell));
 }
 
-function spreadsheetAttendee(row) {
-  const rawPhone = String(row.phone || row.phone_number || '').trim();
-  return {
-    name: String(row.name || row.attendee_name || '').trim(),
-    phone: rawPhone ? (/^\d{10,15}$/.test(rawPhone) ? `+${rawPhone}` : rawPhone) : null,
-    optedIn: spreadsheetBoolean(row.optedIn ?? row.opted_in),
-    status: String(row.status || 'INVITED').trim().toUpperCase(),
-    waitlistRank: row.waitlistRank ?? row.waitlist_rank ?? null
-  };
+function attendeesFromWorkbook(buffer) {
+  const sheetRows = readXlsxRows(buffer);
+  const headerRowIndex = sheetRows.findIndex((row) => hasHeader(row, ['name', 'fullname', 'attendeename']) && hasHeader(row, ['phone', 'phonenumber', 'mobile', 'mobilenumber']));
+  if (headerRowIndex < 0) throw new Error('The workbook needs a Name and Phone header. Optional columns are Call consent (Yes/No), Waitlist (Yes/No), and Waitlist rank.');
+  return rowsToAttendees(sheetRows[headerRowIndex], sheetRows.slice(headerRowIndex + 1));
 }
+
+function googleFormsResponseExportUrl(value) {
+  let input;
+  try { input = new URL(String(value || '').trim()); } catch { throw new Error('Paste the share link for the Google Sheets response sheet.'); }
+  if (input.protocol !== 'https:' || input.hostname !== 'docs.google.com') throw new Error('Use a Google Sheets response-sheet link from docs.google.com. A Google Form link alone cannot expose respondent data.');
+  const match = input.pathname.match(/^\/spreadsheets\/d\/([^/]+)/);
+  if (!match) throw new Error('Use the Google Sheets response-sheet link, not the Google Form edit or preview link.');
+  const gid = input.searchParams.get('gid') || new URLSearchParams(input.hash.replace(/^#/, '')).get('gid');
+  return `https://docs.google.com/spreadsheets/d/${encodeURIComponent(match[1])}/export?format=csv${gid ? `&gid=${encodeURIComponent(gid)}` : ''}`;
+}
+
+// These routes deliberately do not create attendees. The browser keeps the
+// parsed rows until the organiser finishes reviewing and proceeds.
+router.post('/attendees/preview-excel', upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'Attach an .xlsx or .xls file in the multipart field named file' });
+    const attendees = attendeesFromWorkbook(req.file.buffer);
+    return res.json({ attendees, summary: importSummary(attendees) });
+  } catch (error) { return res.status(400).json({ error: error.message, ...(error.invalidRows ? { invalidRows: error.invalidRows } : {}) }); }
+});
+
+router.post('/attendees/preview-google-forms', async (req, res) => {
+  try {
+    const exportUrl = googleFormsResponseExportUrl(req.body.url);
+    const response = await fetch(exportUrl, { signal: AbortSignal.timeout(15000), headers: { Accept: 'text/csv' } });
+    if (!response.ok) return res.status(400).json({ error: 'Rally could not read that Google Sheets response sheet. Make sure it is shared so anyone with the link can view it.' });
+    const contentLength = Number(response.headers.get('content-length') || 0);
+    if (contentLength > 5 * 1024 * 1024) return res.status(400).json({ error: 'The Google Forms response sheet is larger than the 5 MB import limit.' });
+    const csv = await response.text();
+    if (csv.length > 5 * 1024 * 1024) return res.status(400).json({ error: 'The Google Forms response sheet is larger than the 5 MB import limit.' });
+    const attendees = attendeesFromCsv(csv);
+    return res.json({ attendees, summary: importSummary(attendees) });
+  } catch (error) {
+    if (error.name === 'TimeoutError') return res.status(408).json({ error: 'Google Sheets took too long to respond. Try again shortly.' });
+    return res.status(400).json({ error: error.message || 'Rally could not preview that Google Forms response sheet.' });
+  }
+});
 
 router.get('/', async (req, res, next) => {
   try {
@@ -91,7 +124,7 @@ router.post('/', async (req, res, next) => {
         error.status = 404;
         throw error;
       }
-      const createdCampaign = await tx.campaign.create({ data: { eventId: createdEvent.id, name: campaign.name.trim(), attendanceEnabled: campaign.attendanceEnabled !== false, parkingEnabled: campaign.parkingEnabled === true, foodEnabled: campaign.foodEnabled === true, languages: Array.isArray(campaign.languages) && campaign.languages.length ? campaign.languages : ['en'], tone: campaign.tone || 'helpful', deadline: campaign.deadline ? new Date(campaign.deadline) : null, state: campaignStates.has(campaign.state) ? campaign.state : 'DRAFT', sessionSlotOptions: Array.isArray(campaign.sessionSlotOptions) ? campaign.sessionSlotOptions : [] } });
+      const createdCampaign = await tx.campaign.create({ data: { eventId: createdEvent.id, name: campaign.name.trim(), attendanceEnabled: campaign.attendanceEnabled !== false, parkingEnabled: campaign.parkingEnabled === true, foodEnabled: campaign.foodEnabled === true, autoCallWaitlist: campaign.autoCallWaitlist === true, languages: Array.isArray(campaign.languages) && campaign.languages.length ? campaign.languages : ['en'], tone: campaign.tone || 'helpful', deadline: campaign.deadline ? new Date(campaign.deadline) : null, state: campaignStates.has(campaign.state) ? campaign.state : 'DRAFT', sessionSlotOptions: Array.isArray(campaign.sessionSlotOptions) ? campaign.sessionSlotOptions : [] } });
       const createdAttendees = attendees.length ? await tx.attendee.createManyAndReturn({ data: attendees.map((attendee) => attendeeData(attendee, createdEvent.id, createdCampaign.id)) }) : [];
       if (!eventId && createdEvent.capacity) await tx.seat.createMany({ data: Array.from({ length: createdEvent.capacity }, (_, index) => ({ eventId: createdEvent.id, seatNumber: index + 1 })) });
       const allocation = attendees.length ? await reserveInitialCampaignSeats(tx, createdCampaign.id) : { reserved: 0, movedToWaitlist: 0 };
@@ -202,23 +235,7 @@ router.post('/:campaignId/attendees/import-excel', upload.single('file'), async 
     const campaign = await getCampaign(req.params.campaignId);
     if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
     if (!req.file) return res.status(400).json({ error: 'Attach an .xlsx or .xls file in the multipart field named file' });
-    const sheetRows = readXlsxRows(req.file.buffer);
-    const headerRowIndex = sheetRows.findIndex((row) => row.map((cell) => String(cell ?? '').trim().toLowerCase()).includes('name') && row.map((cell) => String(cell ?? '').trim().toLowerCase()).some((cell) => ['phone', 'phone_number'].includes(cell)));
-    if (headerRowIndex < 0) return res.status(400).json({ error: 'The spreadsheet must contain a header row with name and phone columns' });
-    const headers = sheetRows[headerRowIndex].map((header) => String(header).trim());
-    const rows = [];
-    for (const row of sheetRows.slice(headerRowIndex + 1)) {
-      if (row.every((cell) => String(cell ?? '').trim() === '')) break;
-      rows.push(Object.fromEntries(headers.map((header, index) => [header, row[index] ?? ''])));
-    }
-    if (!rows.length) return res.status(400).json({ error: 'The spreadsheet has no attendee rows' });
-    const attendees = rows.map(spreadsheetAttendee);
-    const invalidRows = attendees
-      .map((attendee, index) => ({ attendee, row: index + 2 }))
-      .filter(({ attendee }) => !attendee.name || !attendeeStatuses.has(attendee.status));
-    if (invalidRows.length) {
-      return res.status(400).json({ error: 'Invalid attendee spreadsheet rows', invalidRows: invalidRows.map(({ row }) => row) });
-    }
+    const attendees = attendeesFromWorkbook(req.file.buffer);
     const result = await prisma.$transaction(async (tx) => {
       const created = await tx.attendee.createManyAndReturn({ data: attendees.map((attendee) => attendeeData(attendee, campaign.eventId, campaign.id)) });
       const allocation = await reserveInitialCampaignSeats(tx, campaign.id);
@@ -314,7 +331,7 @@ router.get('/:campaignId/waitlist', async (req, res, next) => {
       callsRequested: pendingOffers.filter((offer) => offer.callRequestedAt).length,
       deliveryFailures: pendingOffers.filter((offer) => offer.callFailureReason).length
     };
-    return res.json({ waitlist, offers, releasedSeats: seats.filter((seat) => seat.status === 'RELEASED'), summary });
+    return res.json({ waitlist, offers, releasedSeats: seats.filter((seat) => seat.status === 'RELEASED'), summary, autoCallWaitlist: campaign.autoCallWaitlist });
   } catch (error) { return next(error); }
 });
 
@@ -322,12 +339,12 @@ router.post('/:campaignId/waitlist/recover', async (req, res, next) => {
   try {
     const campaign = await getCampaign(req.params.campaignId, req.user.id);
     if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
-    const recovery = await reconcileCampaignWaitlist(campaign.id);
-    await dispatchWaitlistRecovery(campaign.id);
+    const { recovery, dispatched } = await dispatchWaitlistRecovery(campaign.id);
     return res.json({
-      message: recovery.offers.length ? `${recovery.offers.length} waitlist offer${recovery.offers.length === 1 ? '' : 's'} created and queued for Sarvam.` : 'Waitlist recovery is up to date. No unallocated seat and callable waitlisted attendee pair is available.',
+      message: dispatched ? `${dispatched} waitlist recovery call${dispatched === 1 ? '' : 's'} sent to Sarvam.` : recovery.offers.length ? `${recovery.offers.length} waitlist offer${recovery.offers.length === 1 ? '' : 's'} prepared, but no Sarvam call was sent.` : 'Waitlist recovery is up to date. No unallocated seat and callable waitlisted attendee pair is available.',
       createdOffers: recovery.offers.length,
-      expiredOffers: recovery.expiredOffers.length
+      expiredOffers: recovery.expiredOffers.length,
+      dispatched
     });
   } catch (error) { return next(error); }
 });
@@ -343,7 +360,7 @@ router.post('/:campaignId/waitlist/:attendeeId/offer', async (req, res, next) =>
   } catch (error) { return next(error); }
 });
 
-router.post('/:campaignId/seats/:seatId/release', async (req, res, next) => { try { const campaign = await getCampaign(req.params.campaignId); const seat = campaign && await prisma.seat.findFirst({ where: { id: req.params.seatId, eventId: campaign.eventId } }); if (!seat) return res.status(404).json({ error: 'Seat not found' }); const released = await prisma.seat.update({ where: { id: seat.id }, data: { status: 'RELEASED', attendeeId: null, releasedAt: new Date() } }); await dispatchWaitlistRecovery(campaign.id); return res.json({ seat: released }); } catch (error) { return next(error); } });
+router.post('/:campaignId/seats/:seatId/release', async (req, res, next) => { try { const campaign = await getCampaign(req.params.campaignId); const seat = campaign && await prisma.seat.findFirst({ where: { id: req.params.seatId, eventId: campaign.eventId } }); if (!seat) return res.status(404).json({ error: 'Seat not found' }); const released = await prisma.seat.update({ where: { id: seat.id }, data: { status: 'RELEASED', attendeeId: null, releasedAt: new Date() } }); if (campaign.autoCallWaitlist) await dispatchAutomaticWaitlistRecovery(campaign.id); return res.json({ seat: released }); } catch (error) { return next(error); } });
 
 router.get('/:campaignId/activity', async (req, res, next) => { try { res.json({ activity: await prisma.callEvent.findMany({ where: { campaignId: req.params.campaignId }, include: { attendee: true }, orderBy: { occurredAt: 'desc' } }) }); } catch (error) { next(error); } });
 router.post('/:campaignId/call-events', async (req, res, next) => { try { const campaign = await getCampaign(req.params.campaignId); const attendee = campaign && await prisma.attendee.findFirst({ where: { id: req.body.attendeeId, campaignId: campaign.id } }); if (!campaign || !attendee || !isString(req.body.eventType)) return res.status(400).json({ error: 'Valid attendeeId and eventType are required' }); const activity = await prisma.callEvent.create({ data: { eventId: campaign.eventId, campaignId: campaign.id, attendeeId: attendee.id, eventType: req.body.eventType, transcript: req.body.transcript || null, details: req.body.details || undefined } }); return res.status(201).json({ activity }); } catch (error) { return next(error); } });

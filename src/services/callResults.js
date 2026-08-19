@@ -115,14 +115,15 @@ async function saveCallResult(payload) {
       });
     }
 
-    return { response, reconcileWaitlist: outcome === 'declined' || seatDecision.releasedSeat === true };
+    return { response, releasedSeat: seatDecision.releasedSeat === true };
   });
 
-  if (saved.reconcileWaitlist) {
-    // The RSVP has committed before any outbound request is made. A Sarvam
-    // outage therefore never loses a valid decline or causes an overbooking.
+  if (campaign.autoCallWaitlist) {
+    // Seat release is always saved first. In automatic mode, recovery waits
+    // until the primary RSVP run has completed; this prevents a waitlisted
+    // attendee from being called halfway through the organiser's main cohort.
     try {
-      await dispatchWaitlistRecovery(campaign.id);
+      await dispatchAutomaticWaitlistRecovery(campaign.id);
     } catch (error) {
       console.error('[Rally waitlist recovery deferred]', JSON.stringify({ campaignId: campaign.id, message: error.message }));
     }
@@ -130,9 +131,27 @@ async function saveCallResult(payload) {
   return saved.response;
 }
 
+async function primaryRunHasCompleted(campaignId) {
+  const primaryAttendees = await prisma.attendee.findMany({
+    where: {
+      campaignId,
+      status: { notIn: ['WAITLISTED', 'OFFERED'] }
+    },
+    select: { id: true, responses: { select: { id: true }, take: 1 } }
+  });
+  return primaryAttendees.length > 0 && primaryAttendees.every((attendee) => attendee.responses.length > 0);
+}
+
+async function dispatchAutomaticWaitlistRecovery(campaignId) {
+  if (!await primaryRunHasCompleted(campaignId)) return { dispatched: false, reason: 'primary_calls_pending' };
+  await dispatchWaitlistRecovery(campaignId);
+  return { dispatched: true };
+}
+
 async function dispatchWaitlistRecovery(campaignId) {
-  await reconcileCampaignWaitlist(campaignId);
+  const recovery = await reconcileCampaignWaitlist(campaignId);
   const offers = await listRecoveryDispatches(campaignId);
+  let dispatched = 0;
   for (const offer of offers) {
     try {
       const result = await requestWaitlistRecoveryCall(offer);
@@ -143,6 +162,7 @@ async function dispatchWaitlistRecovery(campaignId) {
         data: { callRequestedAt: new Date(), sarvamOutboundId: outboundId, callFailureReason: null }
       });
       if (updated.count) {
+        dispatched += 1;
         await prisma.callEvent.create({
           data: {
             eventId: offer.campaign.eventId,
@@ -180,6 +200,7 @@ async function dispatchWaitlistRecovery(campaignId) {
       });
     }
   }
+  return { recovery, dispatched };
 }
 
-module.exports = { dispatchWaitlistRecovery, saveCallResult, validateCallResult };
+module.exports = { dispatchAutomaticWaitlistRecovery, dispatchWaitlistRecovery, saveCallResult, validateCallResult };

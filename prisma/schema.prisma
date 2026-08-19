@@ -98,6 +98,7 @@ model Campaign {
   attendanceEnabled  Boolean   @default(true)
   parkingEnabled     Boolean   @default(false)
   foodEnabled        Boolean   @default(false)
+  autoCallWaitlist   Boolean   @default(false)
   languages          String[]  @default(["en"])
   tone               String    @default("helpful")
   deadline           DateTime?

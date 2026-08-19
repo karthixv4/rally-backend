@@ -1,0 +1,2 @@
+ALTER TABLE "Campaign"
+ADD COLUMN "autoCallWaitlist" BOOLEAN NOT NULL DEFAULT false;

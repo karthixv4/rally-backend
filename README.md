@@ -81,6 +81,9 @@ GET, POST                         /api/campaigns
 GET, PATCH                        /api/campaigns/:campaignId
 POST                              /api/campaigns/:campaignId/attendees/import
 POST                              /api/campaigns/:campaignId/attendees/import-excel
+POST                              /api/campaigns/attendees/preview-excel
+POST                              /api/campaigns/attendees/preview-google-forms
+GET                               /api/attendee-template
 GET                               /api/campaigns/:campaignId/attendees
 GET, PATCH                        /api/campaigns/:campaignId/attendees/:attendeeId
 POST                              /api/campaigns/:campaignId/responses
@@ -101,7 +104,7 @@ The response endpoints accept the Sarvam call fields in `snake_case`: `attendanc
 
 Rally treats event capacity as a shared, physical seat inventory. On import, the first non-waitlisted invitees reserve the available event seats; overflow invitees are safely moved to `WAITLISTED` in import order (or retain their supplied `waitlistRank`). The bulk Sarvam campaign includes only `INVITED` attendees, never waitlisted, offered, confirmed, or released people.
 
-When a primary attendee declines without naming a substitute, Rally releases their reservation, assigns that exact seat to the next opted-in, phone-consented waitlisted attendee, and creates a 30-minute offer. A confirmed recovery call accepts the offer and assigns the seat. A decline or expiry releases it and moves to the next person. Explicit `seat_release: no` and any named substitute prevent automatic release and create an organiser follow-up instead.
+When a primary attendee declines without naming a substitute, Rally releases their reservation. The campaign’s `autoCallWaitlist` preference controls what happens next: with manual recovery (the default), the released seat stays available until an organiser presses **Offer and call next attendees** in Waitlist recovery. With automatic recovery, Rally waits until every primary attendee has a completed call result, then prepares offers and calls the next opted-in, phone-consented waitlisted people. This keeps recovery separate from the primary RSVP run. A confirmed recovery call accepts the offer and assigns the seat; a decline or expiry releases it and moves to the next person. Explicit `seat_release: no` and any named substitute prevent automatic release and create an organiser follow-up instead.
 
 Set `SARVAM_WAITLIST_RECOVERY_ENABLED=true` only after publishing the agent variables below. Rally then uses Sarvam's immediate outbound API for the recovery call; a failed outbound is stored as a visible task and can be retried from **Waitlist recovery** using `POST /api/campaigns/:campaignId/waitlist/recover`.
 
@@ -127,9 +130,13 @@ If call_type is waitlist_recovery:
 
 `seat_offer_id` is kept in Rally's audit trail and lets the recovery result be matched to the reserved seat. It should be mapped through the Sarvam post-call HTTP tool just like `campaign_id` and `attendee_id`.
 
-### Demo XLSX attendee import
+### Attendee import preview
 
-Upload `demo-assets/Rally_Attendee_Import_Template.xlsx` as multipart form-data to `POST /api/campaigns/:campaignId/attendees/import-excel`, using the field name `file`. The importer accepts the template's `name`, `phone`, `optedIn`, `status`, and `waitlistRank` columns, skips the template title/instructions, and validates every attendee row before saving any of them.
+The campaign wizard uses a review-first import: it calls `POST /api/campaigns/attendees/preview-excel` with `file` as multipart form-data, or `POST /api/campaigns/attendees/preview-google-forms` with `{ "url": "<Google Sheets response-sheet link>" }`. Neither endpoint writes to the database; the browser holds the reviewed draft in its session until the organiser continues to call settings.
+
+Use `demo-assets/Rally_Attendee_Import_Template.xlsx` for Excel uploads. Its simple columns are `Name`, `Phone`, `Call consent` (Yes/No), `Waitlist` (Yes/No), and optional `Waitlist rank`. For Google Forms, link the form to Google Sheets through **Responses → View in Sheets**, then share the response sheet as **Anyone with the link: Viewer**. A Google Form link by itself does not expose response data to Rally.
+
+The existing `POST /api/campaigns/:campaignId/attendees/import-excel` endpoint remains available for direct API integrations and writes immediately after validation.
 
 ## Sarvam scheduled calling
 

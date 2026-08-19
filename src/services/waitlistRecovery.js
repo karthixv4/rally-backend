@@ -1,6 +1,12 @@
 const prisma = require('../db/prisma');
 
 const WAITLIST_CALLABLE = { status: 'WAITLISTED', optedIn: true, phone: { not: null } };
+// Several completed calls for the same event can arrive at once. Recovery
+// deliberately serialises their seat changes with an advisory lock, so the
+// Prisma default five-second interactive-transaction limit is too short when
+// another webhook is already reconciling that event.
+const WAITLIST_TRANSACTION_TIMEOUT_MS = Math.max(10000, Number(process.env.WAITLIST_TRANSACTION_TIMEOUT_MS || 20000));
+const WAITLIST_TRANSACTION_MAX_WAIT_MS = Math.max(5000, Number(process.env.WAITLIST_TRANSACTION_MAX_WAIT_MS || 15000));
 
 function offerExpiry() {
   const minutes = Math.max(5, Number(process.env.WAITLIST_OFFER_EXPIRY_MINUTES || 30));
@@ -149,6 +155,9 @@ async function reconcileCampaignWaitlist(campaignId) {
       offers.push(offer);
     }
     return { offers, expiredOffers };
+  }, {
+    maxWait: WAITLIST_TRANSACTION_MAX_WAIT_MS,
+    timeout: WAITLIST_TRANSACTION_TIMEOUT_MS
   });
 }
 

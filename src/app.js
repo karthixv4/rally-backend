@@ -2,6 +2,7 @@ const cors = require('cors');
 const express = require('express');
 const helmet = require('helmet');
 const morgan = require('morgan');
+const path = require('path');
 const campaignRoutes = require('./routes/campaigns');
 const eventRoutes = require('./routes/events');
 const authRoutes = require('./routes/auth');
@@ -52,6 +53,13 @@ app.get('/health', (_req, res) => {
     uptimeSeconds: Math.floor(process.uptime())
   });
 });
+
+// This contains no attendee data, so it is deliberately available before
+// authentication: the signed-in app can download it through a normal link.
+app.get('/api/attendee-template', (_req, res) => res.download(
+  path.join(__dirname, '..', 'demo-assets', 'Rally_Attendee_Import_Template.xlsx'),
+  'Rally_Attendee_Import_Template.xlsx'
+));
 
 app.use('/api/auth', authRoutes);
 app.use('/api/events', requireAuth, eventRoutes);
