@@ -1,6 +1,7 @@
 const express = require('express');
 const prisma = require('../db/prisma');
 const { getCampaignStatus, updateCampaignStatus } = require('../services/sarvamScheduling');
+const { assertCanCreateEvent } = require('../services/planLimits');
 
 const router = express.Router();
 
@@ -32,6 +33,7 @@ router.post('/', async (req, res, next) => {
     const event = eventInput(req.body);
     if (!event.name) return res.status(400).json({ error: 'Event name is required' });
     const created = await prisma.$transaction(async (tx) => {
+      await assertCanCreateEvent(tx, req.user);
       const createdEvent = await tx.event.create({ data: { ...event, userId: req.user.id } });
       if (createdEvent.capacity) {
         await tx.seat.createMany({

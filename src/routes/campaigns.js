@@ -7,6 +7,7 @@ const { saveCallResult, validateCallResult } = require('../services/callResults'
 const { dispatchAutomaticWaitlistRecovery, dispatchWaitlistRecovery } = require('../services/callResults');
 const { getCampaignStatus, updateCampaignStatus } = require('../services/sarvamScheduling');
 const { reserveInitialCampaignSeats } = require('../services/waitlistRecovery');
+const { assertCanCreateCampaign, assertCanCreateEvent } = require('../services/planLimits');
 
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
@@ -116,6 +117,7 @@ router.post('/', async (req, res, next) => {
     if (!campaign || !isString(campaign.name) || (!eventId && (!event || !isString(event.name)))) return res.status(400).json({ error: 'campaign.name and either eventId or event.name are required' });
     if (!Array.isArray(attendees) || attendees.some((attendee) => !isString(attendee.name))) return res.status(400).json({ error: 'attendees must be an array and every attendee needs a name' });
     const result = await prisma.$transaction(async (tx) => {
+      if (!eventId) await assertCanCreateEvent(tx, req.user);
       const createdEvent = eventId
         ? await tx.event.findFirst({ where: { id: eventId, userId: req.user.id } })
         : await tx.event.create({ data: { name: event.name.trim(), startsAt: event.startsAt ? new Date(event.startsAt) : null, venue: event.venue || null, schedule: event.schedule || null, parkingInstructions: event.parkingInstructions || null, helpContact: event.helpContact || null, capacity: Number.isInteger(event.capacity) ? event.capacity : null, userId: req.user.id } });
@@ -124,6 +126,7 @@ router.post('/', async (req, res, next) => {
         error.status = 404;
         throw error;
       }
+      await assertCanCreateCampaign(tx, createdEvent.id, req.user);
       const createdCampaign = await tx.campaign.create({ data: { eventId: createdEvent.id, name: campaign.name.trim(), attendanceEnabled: campaign.attendanceEnabled !== false, parkingEnabled: campaign.parkingEnabled === true, foodEnabled: campaign.foodEnabled === true, autoCallWaitlist: campaign.autoCallWaitlist === true, languages: Array.isArray(campaign.languages) && campaign.languages.length ? campaign.languages : ['en'], tone: campaign.tone || 'helpful', deadline: campaign.deadline ? new Date(campaign.deadline) : null, state: campaignStates.has(campaign.state) ? campaign.state : 'DRAFT', sessionSlotOptions: Array.isArray(campaign.sessionSlotOptions) ? campaign.sessionSlotOptions : [] } });
       const createdAttendees = attendees.length ? await tx.attendee.createManyAndReturn({ data: attendees.map((attendee) => attendeeData(attendee, createdEvent.id, createdCampaign.id)) }) : [];
       if (!eventId && createdEvent.capacity) await tx.seat.createMany({ data: Array.from({ length: createdEvent.capacity }, (_, index) => ({ eventId: createdEvent.id, seatNumber: index + 1 })) });

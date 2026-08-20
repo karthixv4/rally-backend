@@ -2,6 +2,7 @@ const express = require('express');
 const prisma = require('../db/prisma');
 const { createScheduledCampaign, defaultAllowedSchedule, getCampaignStatus, updateCampaignStatus, uploadCohort } = require('../services/sarvamScheduling');
 const { getTranscript, listAttempts } = require('../services/sarvamAnalytics');
+const { completeCampaignWhenSettled } = require('../services/campaignCompletion');
 
 const router = express.Router();
 
@@ -171,7 +172,7 @@ async function campaignAnalytics(campaign, query) {
 
 router.get('/:campaignId/sarvam/status', async (req, res, next) => {
   try {
-    const campaign = await campaignForScheduling(req.params.campaignId);
+    const campaign = await campaignForScheduling(req.params.campaignId, req.user.id);
     if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
     if (!campaign.sarvamCampaignId) return res.json({ sarvamCampaign: null });
     const sarvamCampaign = await getCampaignStatus(campaign.sarvamCampaignId);
@@ -181,7 +182,7 @@ router.get('/:campaignId/sarvam/status', async (req, res, next) => {
 
 router.get('/:campaignId/sarvam/analytics', async (req, res, next) => {
   try {
-    const campaign = await campaignForScheduling(req.params.campaignId);
+    const campaign = await campaignForScheduling(req.params.campaignId, req.user.id);
     if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
     if (!campaign.sarvamCampaignId) return res.json({ analytics: { range: null, summary: { totalAttempts: 0, uniqueAttendees: 0, totalDurationSeconds: 0, retriedAttempts: 0, logIssueAttempts: 0, connectivityStatuses: {}, failureReasons: {} }, attempts: [] } });
     return res.json({ analytics: await campaignAnalytics(campaign, req.query) });
@@ -190,7 +191,7 @@ router.get('/:campaignId/sarvam/analytics', async (req, res, next) => {
 
 router.get('/:campaignId/sarvam/analytics/interactions/:interactionId/transcript', async (req, res, next) => {
   try {
-    const campaign = await campaignForScheduling(req.params.campaignId);
+    const campaign = await campaignForScheduling(req.params.campaignId, req.user.id);
     if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
     const analytics = await campaignAnalytics(campaign, req.query);
     if (!analytics.attempts.some((attempt) => attempt.interactionId === req.params.interactionId)) return res.status(404).json({ error: 'Interaction was not found for this campaign' });
@@ -201,8 +202,13 @@ router.get('/:campaignId/sarvam/analytics/interactions/:interactionId/transcript
 
 router.get('/:campaignId/sarvam/execution-status', async (req, res, next) => {
   try {
-    const campaign = await campaignForScheduling(req.params.campaignId);
+    let campaign = await campaignForScheduling(req.params.campaignId, req.user.id);
     if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+    let completion = null;
+    if (campaign.state === 'ACTIVE' && campaign.sarvamCampaignId) {
+      completion = await completeCampaignWhenSettled(campaign.id).catch((error) => ({ completed: false, reason: 'completion_check_unavailable', details: error.message }));
+      if (completion.completed) campaign = { ...campaign, state: 'COMPLETED' };
+    }
     const [attendees, callEvents, responses] = await Promise.all([
       prisma.attendee.findMany({ where: { campaignId: campaign.id }, select: { id: true, phone: true, optedIn: true, status: true } }),
       prisma.callEvent.findMany({ where: { campaignId: campaign.id }, orderBy: { occurredAt: 'desc' }, take: 10, include: { attendee: { select: { name: true } } } }),
@@ -216,6 +222,7 @@ router.get('/:campaignId/sarvam/execution-status', async (req, res, next) => {
     const now = new Date();
     const schedulerState = !hasSarvamSchedule
       ? campaign.state === 'PAUSED' ? 'paused_before_launch' : 'not_started'
+      : campaign.state === 'COMPLETED' ? 'completed'
       : campaign.state === 'PAUSED' ? 'paused'
       : campaign.sarvamScheduleEndsAt && campaign.sarvamScheduleEndsAt < now ? 'schedule_ended'
       : campaign.sarvamScheduleStartsAt && campaign.sarvamScheduleStartsAt > now ? 'scheduled'
@@ -245,7 +252,8 @@ router.get('/:campaignId/sarvam/execution-status', async (req, res, next) => {
           uncertain: outcomeCount('UNCERTAIN'),
           unavailable: responses.length - outcomeCount('CONFIRMED') - outcomeCount('DECLINED') - outcomeCount('UNCERTAIN')
         },
-        latestActivity: callEvents[0] ? { eventType: callEvents[0].eventType, occurredAt: callEvents[0].occurredAt, attendeeName: callEvents[0].attendee?.name || null } : null
+        latestActivity: callEvents[0] ? { eventType: callEvents[0].eventType, occurredAt: callEvents[0].occurredAt, attendeeName: callEvents[0].attendee?.name || null } : null,
+        completion
       }
     });
   } catch (error) { return next(error); }
@@ -253,7 +261,7 @@ router.get('/:campaignId/sarvam/execution-status', async (req, res, next) => {
 
 router.post('/:campaignId/sarvam/schedule', async (req, res, next) => {
   try {
-    const campaign = await campaignForScheduling(req.params.campaignId);
+    const campaign = await campaignForScheduling(req.params.campaignId, req.user.id);
     if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
     if (campaign.sarvamCampaignId) return res.status(409).json({ error: 'This campaign is already scheduled with Sarvam', sarvamCampaignId: campaign.sarvamCampaignId });
     if (!req.body.startTimestamp || !req.body.endTimestamp) return res.status(400).json({ error: 'startTimestamp and endTimestamp are required' });
@@ -269,7 +277,7 @@ router.post('/:campaignId/sarvam/schedule', async (req, res, next) => {
 
 router.post('/:campaignId/sarvam/cohort', async (req, res, next) => {
   try {
-    const campaign = await campaignForScheduling(req.params.campaignId);
+    const campaign = await campaignForScheduling(req.params.campaignId, req.user.id);
     if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
     if (!campaign.sarvamCampaignId) return res.status(409).json({ error: 'Schedule the campaign with Sarvam before uploading a cohort' });
     const { attendees, readiness } = await callableAttendeeReport(campaign.id);
@@ -282,7 +290,7 @@ router.post('/:campaignId/sarvam/cohort', async (req, res, next) => {
 
 router.post('/:campaignId/sarvam/launch', async (req, res, next) => {
   try {
-    const campaign = await campaignForScheduling(req.params.campaignId);
+    const campaign = await campaignForScheduling(req.params.campaignId, req.user.id);
     if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
 
     // Validate the imported list before creating anything in Sarvam. This prevents an
@@ -317,7 +325,7 @@ router.post('/:campaignId/sarvam/launch', async (req, res, next) => {
 router.put('/:campaignId/sarvam/status', async (req, res, next) => {
   try {
     if (!['pause', 'resume'].includes(req.body.action)) return res.status(400).json({ error: 'action must be pause or resume' });
-    const campaign = await campaignForScheduling(req.params.campaignId);
+    const campaign = await campaignForScheduling(req.params.campaignId, req.user.id);
     if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
     const isScheduled = Boolean(campaign.sarvamCampaignId);
     const existingSarvamCampaign = isScheduled ? await getCampaignStatus(campaign.sarvamCampaignId) : null;

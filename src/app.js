@@ -9,6 +9,7 @@ const authRoutes = require('./routes/auth');
 const voiceRoutes = require('./routes/voice');
 const taskRoutes = require('./routes/tasks');
 const sarvamSchedulingRoutes = require('./routes/sarvamScheduling');
+const adminRoutes = require('./routes/admin');
 const { requireAuth } = require('./middleware/requireAuth');
 
 const app = express();
@@ -67,6 +68,7 @@ app.use('/api/campaigns', requireAuth, campaignRoutes);
 app.use('/api/voice', voiceRoutes);
 app.use('/api/tasks', requireAuth, taskRoutes);
 app.use('/api/campaigns', requireAuth, sarvamSchedulingRoutes);
+app.use('/api/admin', requireAuth, adminRoutes);
 
 app.use((_req, res) => {
   res.status(404).json({ error: 'Route not found' });

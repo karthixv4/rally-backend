@@ -24,7 +24,7 @@ function requireAuth(req, _res, next) {
       error.status = 401;
       throw error;
     }
-    req.user = { id: payload.sub, email: payload.email, name: payload.name || null };
+    req.user = { id: payload.sub, email: payload.email, name: payload.name || null, role: payload.role || 'USER' };
     return next();
   } catch (error) {
     if (!error.status) error.status = 401;
@@ -32,4 +32,15 @@ function requireAuth(req, _res, next) {
   }
 }
 
-module.exports = { requireAuth, jwtSecret };
+function requireAdmin(req, _res, next) {
+  const configuredAdmins = new Set(String(process.env.ADMIN_EMAILS || '')
+    .split(',')
+    .map((email) => email.trim().toLowerCase())
+    .filter(Boolean));
+  if (req.user?.role === 'ADMIN' || configuredAdmins.has(String(req.user?.email || '').toLowerCase())) return next();
+  const error = new Error('Administrator access is required');
+  error.status = 403;
+  return next(error);
+}
+
+module.exports = { requireAuth, requireAdmin, jwtSecret };

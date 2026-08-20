@@ -1,6 +1,7 @@
 const prisma = require('../db/prisma');
 const { applySeatDecision, listRecoveryDispatches, reconcileCampaignWaitlist } = require('./waitlistRecovery');
 const { requestWaitlistRecoveryCall } = require('./sarvamScheduling');
+const { completeCampaignWhenSettled } = require('./campaignCompletion');
 
 const callOutcomes = new Set([
   'confirmed', 'declined', 'uncertain', 'wrong_number', 'voicemail', 'call_disconnected'
@@ -127,6 +128,14 @@ async function saveCallResult(payload) {
     } catch (error) {
       console.error('[Rally waitlist recovery deferred]', JSON.stringify({ campaignId: campaign.id, message: error.message }));
     }
+  }
+  // Let Sarvam retry any delivery it has queued. Once analytics confirms every
+  // callable attendee is settled, Rally pauses the unused remainder of the
+  // scheduled window and marks this run complete.
+  try {
+    await completeCampaignWhenSettled(campaign.id);
+  } catch (error) {
+    console.error('[Rally campaign completion check deferred]', JSON.stringify({ campaignId: campaign.id, message: error.message }));
   }
   return saved.response;
 }
